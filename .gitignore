@@ -1,0 +1,8 @@
+.env
+.venv/
+.runtime/
+__pycache__/
+*.py[cod]
+.coverage
+demo-credentials.txt
+test-report.txt
