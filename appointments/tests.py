@@ -4,7 +4,7 @@ from threading import Barrier
 from unittest.mock import patch
 from django.core.exceptions import ValidationError
 from django.db import close_old_connections, connection
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings, tag
 from rest_framework.test import APIClient
 from accounts.models import User, Patient, Membership, Consent
 from configuration.models import Organization, Facility, Specialty, Doctor, Service, FeeVersion, PolicyVersion, ScheduleRule, Leave
@@ -287,6 +287,7 @@ class BookingTests(BookingFixture, TestCase):
         self.assertEqual(self.post_hold(client=client).status_code,403)
 
 
+@tag('phase7')
 @override_settings(DEBUG=True, CACHES={'default':{'BACKEND':'django.core.cache.backends.locmem.LocMemCache'}})
 class BookingConcurrencyTests(BookingFixture, TransactionTestCase):
     def race(self, functions):

@@ -1,7 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from django.db import connections,transaction
-from django.test import TestCase,TransactionTestCase
+from django.test import TestCase,TransactionTestCase,tag
+from django.utils import timezone
+from datetime import timedelta
+from unittest.mock import patch
 from django.core.exceptions import ValidationError
 from accounts.models import User
 from .services import audit,enqueue,execute_once
@@ -35,6 +38,29 @@ class FoundationTests(TestCase):
         with self.assertRaises(RuntimeError): execute_once(self.user,'test','key',{},command)
         self.assertFalse(IdempotencyRecord.objects.exists());self.assertFalse(AuditEvent.objects.exists())
 
+    @tag('phase7')
+    def test_outbox_dispatch_only_enqueues_due_events(self):
+        due = enqueue('due', 'demo.ping', {})
+        future = enqueue('future', 'demo.ping', {})
+        future.available_at = timezone.now() + timedelta(minutes=5)
+        future.save(update_fields=['available_at'])
+        done = enqueue('done', 'demo.ping', {})
+        done.processed_at = timezone.now()
+        done.save(update_fields=['processed_at'])
+        with patch('core.tasks.process_event.delay') as delayed:
+            from .tasks import dispatch_outbox
+            dispatch_outbox()
+        delayed.assert_called_once_with(due.pk)
+
+    @tag('phase7')
+    def test_outbox_consumer_leaves_failed_event_for_recovery(self):
+        event = enqueue('recovery', 'unsupported.phase7', {})
+        with self.assertRaises(ValueError):
+            process_event(event.pk)
+        event.refresh_from_db()
+        self.assertIsNone(event.processed_at)
+
+@tag('phase7')
 class IdempotencyConcurrencyTests(TransactionTestCase):
     def test_concurrent_commands_have_one_effect_on_mariadb(self):
         user=User.objects.create_user('race@example.test','UnitTest-strong-927!')
