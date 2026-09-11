@@ -1,0 +1,144 @@
+import uuid
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import models
+from core.models import AppendOnlyQuerySet
+
+
+class Checkout(models.Model):
+    PURPOSES = [('appointment', 'Appointment payment'), ('reschedule_additional', 'Additional reschedule payment')]
+    STATUSES = [(s, s.replace('_', ' ').title()) for s in ['pending', 'succeeded', 'failed', 'expired', 'unmatched']]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    appointment = models.ForeignKey('appointments.Appointment', null=True, blank=True, on_delete=models.PROTECT, related_name='checkouts')
+    change = models.ForeignKey('AppointmentChange', null=True, blank=True, on_delete=models.PROTECT, related_name='checkouts')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    purpose = models.CharField(max_length=32, choices=PURPOSES)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default='LKR')
+    status = models.CharField(max_length=16, choices=STATUSES, default='pending')
+    provider_reference = models.CharField(max_length=64, unique=True)
+    last_event_id = models.CharField(max_length=64, blank=True)
+    expires_at = models.DateTimeField()
+    version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['status', 'expires_at'])]
+
+
+class Payment(models.Model):
+    KINDS = [('charge', 'Charge'), ('refund', 'Refund')]
+    METHODS = [('counter', 'Counter'), ('hosted', 'Hosted')]
+    STATUSES = [(s, s.title()) for s in ['pending', 'succeeded', 'failed']]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    appointment = models.ForeignKey('appointments.Appointment', null=True, blank=True, on_delete=models.PROTECT, related_name='payments')
+    checkout = models.ForeignKey(Checkout, null=True, blank=True, on_delete=models.PROTECT, related_name='payments')
+    obligation = models.ForeignKey('RefundObligation', null=True, blank=True, on_delete=models.PROTECT, related_name='payments')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT)
+    kind = models.CharField(max_length=12, choices=KINDS)
+    method = models.CharField(max_length=12, choices=METHODS)
+    status = models.CharField(max_length=12, choices=STATUSES, default='succeeded')
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default='LKR')
+    provider_event_id = models.CharField(max_length=64, unique=True)
+    provider_reference = models.CharField(max_length=64)
+    receipt_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
+    snapshot = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = AppendOnlyQuerySet.as_manager()
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('Payments are append-only.')
+        return super().save(*args, **kwargs)
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Payments are append-only.')
+
+    class Meta:
+        indexes = [models.Index(fields=['appointment', 'created_at']), models.Index(fields=['facility', 'created_at'])]
+
+
+class RefundObligation(models.Model):
+    STATUSES = [(s, s.title()) for s in ['pending', 'refunded', 'cancelled']]
+    REASONS = [('cancellation', 'Cancellation'), ('lower_fee_reschedule', 'Lower-fee reschedule'), ('staff_partial', 'Staff refund')]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    appointment = models.ForeignKey('appointments.Appointment', on_delete=models.PROTECT, related_name='refund_obligations')
+    change = models.ForeignKey('AppointmentChange', null=True, blank=True, on_delete=models.PROTECT, related_name='obligations')
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default='LKR')
+    status = models.CharField(max_length=12, choices=STATUSES, default='pending')
+    reason = models.CharField(max_length=32, choices=REASONS)
+    version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class AppointmentChange(models.Model):
+    KINDS = [('cancellation', 'Cancellation'), ('reschedule', 'Reschedule')]
+    DIRECTIONS = [(s, s.title()) for s in ['none', 'same', 'higher', 'lower']]
+    STATUSES = [(s, s.replace('_', ' ').title()) for s in ['pending_payment', 'completed', 'failed', 'cancelled']]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    original = models.ForeignKey('appointments.Appointment', on_delete=models.PROTECT, related_name='outgoing_changes')
+    replacement = models.ForeignKey('appointments.Appointment', null=True, blank=True, on_delete=models.PROTECT, related_name='incoming_changes')
+    hold = models.ForeignKey('appointments.Reservation', null=True, blank=True, on_delete=models.PROTECT, related_name='changes')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    kind = models.CharField(max_length=16, choices=KINDS)
+    fee_direction = models.CharField(max_length=12, choices=DIRECTIONS, default='none')
+    status = models.CharField(max_length=20, choices=STATUSES, default='completed')
+    credited_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    additional_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    refund_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['original', 'status'])]
+
+
+class FinanceException(models.Model):
+    STATUSES = [(s, s.title()) for s in ['open', 'assigned', 'resolved']]
+    REASONS = [
+        ('late_payment', 'Late payment'),
+        ('unmatched', 'Unmatched payment'),
+        ('amount_mismatch', 'Amount mismatch'),
+        ('malformed', 'Malformed provider event'),
+        ('overpayment', 'Overpayment'),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    facility = models.ForeignKey('configuration.Facility', null=True, blank=True, on_delete=models.PROTECT)
+    appointment = models.ForeignKey('appointments.Appointment', null=True, blank=True, on_delete=models.PROTECT, related_name='finance_exceptions')
+    checkout = models.ForeignKey(Checkout, null=True, blank=True, on_delete=models.PROTECT, related_name='exceptions')
+    change = models.ForeignKey(AppointmentChange, null=True, blank=True, on_delete=models.PROTECT, related_name='exceptions')
+    status = models.CharField(max_length=12, choices=STATUSES, default='open')
+    reason = models.CharField(max_length=24, choices=REASONS)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    currency = models.CharField(max_length=3, default='LKR')
+    provider_event_id = models.CharField(max_length=64, unique=True)
+    provider_reference = models.CharField(max_length=64, blank=True)
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT, related_name='assigned_exceptions')
+    note = models.CharField(max_length=240, blank=True)
+    version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['facility', 'status'])]
+
+
+class ExceptionNote(models.Model):
+    exception = models.ForeignKey(FinanceException, on_delete=models.PROTECT, related_name='notes')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    from_status = models.CharField(max_length=12, blank=True)
+    to_status = models.CharField(max_length=12)
+    note = models.CharField(max_length=240)
+    created_at = models.DateTimeField(auto_now_add=True)
+    objects = AppendOnlyQuerySet.as_manager()
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('Exception notes are append-only.')
+        return super().save(*args, **kwargs)
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Exception notes are append-only.')

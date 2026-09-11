@@ -9,8 +9,29 @@ def process_event(event_id):
     with transaction.atomic():
         event=OutboxEvent.objects.select_for_update().get(pk=event_id)
         if event.processed_at or event.available_at > timezone.now(): return
-        # Phase 2 consumer contract: record durable acknowledgements, no SMS/payment side effects.
-        if event.topic not in {'account.registered','configuration.changed','demo.ping','appointment.confirmed'}:
+        if event.topic in {
+            "appointment.confirmed", "appointment.changed", "appointment.cancelled",
+            "appointment.reminder", "appointment.rescheduled",
+        }:
+            from communications.services import consume_notification_event
+            notification_event = {
+                "appointment.confirmed": "confirmation",
+                "appointment.changed": "changed",
+                "appointment.cancelled": "cancelled",
+                "appointment.reminder": "reminder",
+                "appointment.rescheduled": "changed",
+            }[event.topic]
+            delivery = consume_notification_event(event.payload, notification_event)
+            if delivery and delivery.status == "failed":
+                event.available_at = delivery.next_attempt_at or timezone.now()
+                event.save(update_fields=["available_at"])
+                return
+        elif event.topic == "payment.callback.delayed":
+            from finance.services import apply_signed_callback
+            apply_signed_callback(
+                event.payload["body"].encode(), event.payload["signature"]
+            )
+        elif event.topic not in {'account.registered','configuration.changed','demo.ping','session.cancelled','payment.recorded','payment.refunded'}:
             raise ValueError('No consumer registered for this event topic.')
         ProcessedEvent.objects.get_or_create(key=event.key,defaults={'result':{'topic':event.topic,'acknowledged':True}})
         event.processed_at=timezone.now()

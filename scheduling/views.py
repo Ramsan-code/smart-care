@@ -48,7 +48,9 @@ def history(request):
 def detail(request, pk):
     appointment = get_object_or_404(scoped_appointments(request.user), pk=pk)
     audit(request.user, 'appointment.read', pk, appointment.facility, correlation_id=request.correlation_id)
-    return render(request, 'appointment_detail.html', {'appointment': appointment})
+    from finance.services import appointment_financials
+    return render(request, 'appointment_detail.html', {'appointment': appointment,
+        'financials': appointment_financials(appointment)})
 
 
 class PublishForm(forms.Form):

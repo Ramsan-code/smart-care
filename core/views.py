@@ -70,7 +70,7 @@ class CatalogView(APIView):
             data={'facilities':list(facilities.values('id','name','timezone','currency')),
                   'doctors':list(Doctor.objects.filter(facility__in=facilities,active=True,verified=True).values('id','name','specialty__name','facility_id')),
                   'services':list(Service.objects.filter(facility__in=facilities,active=True).values('id','name','duration_minutes','facility_id')),
-                  'booking_available':True,'phase':3}
+                  'booking_available':True,'phase':4}
             try: cache.set(key,data,30)
             except Exception: pass
         return Response(data)

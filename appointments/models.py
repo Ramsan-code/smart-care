@@ -79,3 +79,26 @@ class AppointmentHistory(models.Model):
         if not self._state.adding: raise ValidationError('Appointment history is append-only.')
         return super().save(*args, **kwargs)
     def delete(self, *args, **kwargs): raise ValidationError('Appointment history is append-only.')
+
+
+class SessionCancellation(models.Model):
+    session = models.OneToOneField('scheduling.Session', on_delete=models.PROTECT, related_name='cancellation')
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    reason = models.CharField(max_length=240)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class CancellationResolution(models.Model):
+    STATUSES = [('pending', 'Pending'), ('contacted', 'Contacted'), ('resolved', 'Resolved')]
+    OUTCOMES = [('refund', 'Refund'), ('rescheduled', 'Rescheduled'), ('credit', 'Credit'), ('unreachable', 'Unreachable')]
+    cancellation = models.ForeignKey(SessionCancellation, on_delete=models.PROTECT, related_name='resolutions')
+    appointment = models.OneToOneField(Appointment, on_delete=models.PROTECT, related_name='cancellation_resolution')
+    status = models.CharField(max_length=12, choices=STATUSES, default='pending')
+    outcome = models.CharField(max_length=16, choices=OUTCOMES, blank=True)
+    note = models.CharField(max_length=240, blank=True)
+    version = models.PositiveIntegerField(default=1)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['cancellation', 'status'])]

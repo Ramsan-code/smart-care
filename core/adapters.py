@@ -1,4 +1,4 @@
-"""Contracts only. Real payment/SMS integrations belong to later phases."""
+"""Contracts only. Hosted payments use the simulated adapter; SMS belongs to a later phase."""
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol

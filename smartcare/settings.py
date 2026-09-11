@@ -11,7 +11,7 @@ ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
 INSTALLED_APPS = [
     'django.contrib.admin', 'django.contrib.auth', 'django.contrib.contenttypes',
     'django.contrib.sessions', 'django.contrib.messages', 'django.contrib.staticfiles',
-    'rest_framework', 'accounts', 'configuration', 'core', 'scheduling', 'appointments',
+    'rest_framework', 'accounts', 'configuration', 'core', 'scheduling', 'appointments', 'finance', 'communications',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware', 'django.contrib.sessions.middleware.SessionMiddleware',
@@ -25,14 +25,17 @@ TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates', 'DIR
                   'django.template.context_processors.request', 'django.contrib.auth.context_processors.auth',
                   'django.contrib.messages.context_processors.messages', 'core.context.app_context']}}]
 WSGI_APPLICATION = 'smartcare.wsgi.application'
-DATABASES = {'default': {
-    'ENGINE': 'django.db.backends.mysql', 'NAME': os.getenv('DB_NAME', 'smartcare'),
-    'USER': os.getenv('DB_USER', 'smartcare'), 'PASSWORD': os.environ['DB_PASSWORD'],
-    'HOST': os.getenv('DB_HOST', '127.0.0.1'), 'PORT': os.getenv('DB_PORT', '3307'),
-    'OPTIONS': {'charset': 'utf8mb4', 'isolation_level': 'read committed',
-                'init_command': "SET sql_mode='STRICT_TRANS_TABLES'"},
-    'TEST': {'NAME': 'test_smartcare'},
-}}
+if os.getenv('DB_ENGINE') == 'sqlite':
+    DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / '.runtime' / 'smartcare.sqlite3'}}
+else:
+    DATABASES = {'default': {
+        'ENGINE': 'django.db.backends.mysql', 'NAME': os.getenv('DB_NAME', 'smartcare'),
+        'USER': os.getenv('DB_USER', 'smartcare'), 'PASSWORD': os.environ['DB_PASSWORD'],
+        'HOST': os.getenv('DB_HOST', '127.0.0.1'), 'PORT': os.getenv('DB_PORT', '3307'),
+        'OPTIONS': {'charset': 'utf8mb4', 'isolation_level': 'read committed',
+                    'init_command': "SET sql_mode='STRICT_TRANS_TABLES'"},
+        'TEST': {'NAME': 'test_smartcare'},
+    }}
 AUTH_USER_MODEL = 'accounts.User'
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -82,3 +85,4 @@ LOGGING = {'version': 1, 'disable_existing_loggers': False,
            'root': {'handlers': ['console'], 'level': 'INFO'}}
 
 CELERY_BEAT_SCHEDULE['hold-expiry'] = {'task': 'appointments.tasks.expire_reservations', 'schedule': 30.0}
+CELERY_BEAT_SCHEDULE['appointment-reminders'] = {'task': 'communications.tasks.queue_due_reminders', 'schedule': 60.0}

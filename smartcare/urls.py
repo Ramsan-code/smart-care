@@ -5,7 +5,56 @@ from accounts import views as account_views, api
 from core import views
 from scheduling.api import AvailabilityView
 from appointments.api import HoldsView, HoldDetailView, AppointmentsView, AppointmentDetailView
+from finance.api import CheckoutView, CheckoutSimulationView, CallbackView, CounterPaymentView, RefundView, CancellationView, RescheduleView, ChangePaymentView, PaymentHistoryView, ExceptionAssignView, ExceptionResolveView
 from scheduling import views as booking_views
+from communications.api import DeliveryListView, DeliveryRetryView
+from appointments.operations import transition_appointment, cancel_session, resolve_cancellation
+from rest_framework import serializers
+from rest_framework.response import Response
+from scheduling.api import DomainView, StrictInput
+
+
+class OperationInput(StrictInput):
+    expected_version = serializers.IntegerField(min_value=1)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=240)
+
+
+class AppointmentOperationView(DomainView):
+    def post(self, request, pk, state):
+        form = OperationInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        return Response(transition_appointment(
+            request.user, pk, form.validated_data["expected_version"], state,
+            form.validated_data.get("note", "")
+        ))
+
+
+class SessionCancelInput(StrictInput):
+    expected_version = serializers.IntegerField(min_value=1)
+    reason = serializers.CharField(max_length=240)
+
+
+class SessionCancelView(DomainView):
+    def post(self, request, pk):
+        form = SessionCancelInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        return Response(cancel_session(request.user, pk, **form.validated_data))
+
+
+class ResolutionInput(StrictInput):
+    expected_version = serializers.IntegerField(min_value=1)
+    status = serializers.ChoiceField(choices=["pending", "contacted", "resolved"])
+    outcome = serializers.ChoiceField(
+        choices=["refund", "rescheduled", "credit", "unreachable"], required=False
+    )
+    note = serializers.CharField(required=False, allow_blank=True, max_length=240)
+
+
+class ResolutionView(DomainView):
+    def post(self, request, pk):
+        form = ResolutionInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        return Response(resolve_cancellation(request.user, pk, **form.validated_data))
 
 urlpatterns=[
     path('book/', booking_views.book, name='book'),
@@ -17,6 +66,22 @@ urlpatterns=[
     path('api/v1/holds/<uuid:pk>/', HoldDetailView.as_view()),
     path('api/v1/appointments/', AppointmentsView.as_view()),
     path('api/v1/appointments/<uuid:pk>/', AppointmentDetailView.as_view()),
+    path('api/v1/payments/checkouts/', CheckoutView.as_view()),
+    path('api/v1/payments/checkouts/<uuid:pk>/simulate/', CheckoutSimulationView.as_view()),
+    path('api/v1/payments/callback/', CallbackView.as_view()),
+    path('api/v1/appointments/<uuid:pk>/payments/counter/', CounterPaymentView.as_view()),
+    path('api/v1/appointments/<uuid:pk>/payments/', PaymentHistoryView.as_view()),
+    path('api/v1/appointments/<uuid:pk>/refunds/', RefundView.as_view()),
+    path('api/v1/appointments/<uuid:pk>/cancel/', CancellationView.as_view()),
+    path('api/v1/appointments/<uuid:pk>/reschedule/', RescheduleView.as_view()),
+    path('api/v1/appointment-changes/<uuid:pk>/payments/counter/', ChangePaymentView.as_view()),
+    path('api/v1/finance/exceptions/<uuid:pk>/assign/', ExceptionAssignView.as_view()),
+    path('api/v1/finance/exceptions/<uuid:pk>/resolve/', ExceptionResolveView.as_view()),
+    path('api/v1/communications/deliveries/', DeliveryListView.as_view()),
+    path('api/v1/communications/deliveries/<int:pk>/retry/', DeliveryRetryView.as_view()),
+    path('api/v1/appointments/<uuid:pk>/operations/<str:state>/', AppointmentOperationView.as_view()),
+    path('api/v1/sessions/<uuid:pk>/cancel/', SessionCancelView.as_view()),
+    path('api/v1/cancellation-resolutions/<int:pk>/', ResolutionView.as_view()),
     path('',views.home,name='home'),path('workspace/',views.workspace,name='workspace'),
     path('configuration/',views.configuration_overview,name='configuration'),path('audit/',views.audit_log,name='audit'),
     path('team/',account_views.staff,name='staff'),path('team/<int:pk>/toggle/',account_views.toggle_membership,name='toggle-membership'),
