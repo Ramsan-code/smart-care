@@ -5,7 +5,10 @@ from accounts import views as account_views, api
 from core import views
 from scheduling.api import AvailabilityView
 from appointments.api import HoldsView, HoldDetailView, AppointmentsView, AppointmentDetailView
-from finance.api import CheckoutView, CheckoutSimulationView, CallbackView, CounterPaymentView, RefundView, CancellationView, RescheduleView, ChangePaymentView, PaymentHistoryView, ExceptionAssignView, ExceptionResolveView
+from finance.api import (CheckoutView, CheckoutSimulationView, CallbackView, CounterPaymentView, RefundView, CancellationView,
+                         RescheduleView, ChangePaymentView, PaymentHistoryView, ExceptionAssignView, ExceptionResolveView,
+                         GatewayImportView, PayablesView, DoctorStatementView, SettlementView, SettlementActionView,
+                         SettlementExportView, RefundAdjustmentView, OperationsReportView)
 from scheduling import views as booking_views
 from communications.api import DeliveryListView, DeliveryRetryView
 from appointments.operations import transition_appointment, cancel_session, resolve_cancellation
@@ -77,6 +80,14 @@ urlpatterns=[
     path('api/v1/appointment-changes/<uuid:pk>/payments/counter/', ChangePaymentView.as_view()),
     path('api/v1/finance/exceptions/<uuid:pk>/assign/', ExceptionAssignView.as_view()),
     path('api/v1/finance/exceptions/<uuid:pk>/resolve/', ExceptionResolveView.as_view()),
+    path('api/v1/finance/gateway/imports/', GatewayImportView.as_view()),
+    path('api/v1/finance/payables/', PayablesView.as_view()),
+    path('api/v1/finance/doctor/statement/', DoctorStatementView.as_view()),
+    path('api/v1/finance/settlements/', SettlementView.as_view()),
+    path('api/v1/finance/settlements/<int:pk>/<str:action>/', SettlementActionView.as_view()),
+    path('api/v1/finance/settlements/<int:pk>/export/', SettlementExportView.as_view()),
+    path('api/v1/finance/settlements/refund-adjustments/', RefundAdjustmentView.as_view()),
+    path('api/v1/finance/reports/operations/', OperationsReportView.as_view()),
     path('api/v1/communications/deliveries/', DeliveryListView.as_view()),
     path('api/v1/communications/deliveries/<int:pk>/retry/', DeliveryRetryView.as_view()),
     path('api/v1/appointments/<uuid:pk>/operations/<str:state>/', AppointmentOperationView.as_view()),

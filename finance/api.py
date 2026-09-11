@@ -16,6 +16,9 @@ from .services import (
     simulate_checkout,
     payment_history,
 )
+from .phase6 import (import_gateway_csv, create_payables, doctor_statement,
+                     create_settlement, change_settlement, export_settlement, operations_report,
+                     add_refund_adjustment)
 
 
 class AppointmentActionInput(StrictInput):
@@ -55,6 +58,25 @@ class ExceptionAssignInput(StrictInput):
 class ExceptionResolveInput(StrictInput):
     expected_version = serializers.IntegerField(min_value=1)
     note = serializers.CharField(max_length=240)
+
+
+class GatewayImportInput(StrictInput):
+    facility_id = serializers.IntegerField(min_value=1)
+
+
+class FacilityInput(StrictInput):
+    facility_id = serializers.IntegerField(min_value=1)
+
+
+class SettlementInput(FacilityInput):
+    reference = serializers.CharField(max_length=128)
+    adjustment = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+
+class RefundAdjustmentInput(StrictInput):
+    paid_batch_id = serializers.IntegerField(min_value=1)
+    payable_id = serializers.IntegerField(min_value=1)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
 
 
 class CallbackView(DomainView):
@@ -154,3 +176,56 @@ class ExceptionResolveView(DomainView):
         form = ExceptionResolveInput(data=request.data)
         form.is_valid(raise_exception=True)
         return Response(resolve_exception(request.user, pk, **form.validated_data))
+
+
+class GatewayImportView(DomainView):
+    def post(self, request):
+        form = GatewayImportInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'code': 'validation', 'message': 'CSV file is required.'}, status=400)
+        return Response(import_gateway_csv(request.user, form.validated_data['facility_id'], upload), status=201)
+
+
+class PayablesView(DomainView):
+    def post(self, request):
+        form = FacilityInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        return Response({'results': create_payables(request.user, form.validated_data['facility_id'])}, status=201)
+
+
+class DoctorStatementView(DomainView):
+    def get(self, request):
+        return Response({'results': doctor_statement(request.user)})
+
+
+class SettlementView(DomainView):
+    def post(self, request):
+        form = SettlementInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        return Response(create_settlement(request.user, **form.validated_data), status=201)
+
+
+class SettlementActionView(DomainView):
+    def post(self, request, pk, action):
+        return Response(change_settlement(request.user, pk, action))
+
+
+class SettlementExportView(DomainView):
+    def get(self, request, pk):
+        return export_settlement(request.user, pk)
+
+
+class RefundAdjustmentView(DomainView):
+    def post(self, request):
+        form = RefundAdjustmentInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        return Response(add_refund_adjustment(request.user, **form.validated_data), status=201)
+
+
+class OperationsReportView(DomainView):
+    def get(self, request):
+        form = FacilityInput(data=request.query_params)
+        form.is_valid(raise_exception=True)
+        return Response(operations_report(request.user, form.validated_data['facility_id']))

@@ -142,3 +142,76 @@ class ExceptionNote(models.Model):
         return super().save(*args, **kwargs)
     def delete(self, *args, **kwargs):
         raise ValidationError('Exception notes are append-only.')
+
+
+class GatewayImport(models.Model):
+    """Immutable record of a simulated gateway CSV upload."""
+    STATUSES = [('pending', 'Pending'), ('processed', 'Processed'), ('failed', 'Failed')]
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    filename = models.CharField(max_length=255)
+    file_hash = models.CharField(max_length=64)
+    status = models.CharField(max_length=16, choices=STATUSES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['facility', 'file_hash'], name='finance_gateway_file_once')]
+
+
+class GatewayImportRow(models.Model):
+    STATUSES = [('matched', 'Matched'), ('unmatched', 'Unmatched'), ('amount_mismatch', 'Amount mismatch'),
+                ('invalid', 'Invalid')]
+    batch = models.ForeignKey(GatewayImport, on_delete=models.PROTECT, related_name='rows')
+    row_number = models.PositiveIntegerField()
+    transaction_reference = models.CharField(max_length=128)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True)
+    status_value = models.CharField(max_length=32, blank=True)
+    provider_event_id = models.CharField(max_length=128, blank=True)
+    row_status = models.CharField(max_length=20, choices=STATUSES)
+    error = models.CharField(max_length=240, blank=True)
+    payment = models.ForeignKey(Payment, null=True, blank=True, on_delete=models.PROTECT, related_name='gateway_rows')
+    raw = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['batch', 'row_number'], name='finance_gateway_row_once')]
+
+
+class DoctorPayable(models.Model):
+    STATUSES = [('versioned', 'Versioned'), ('paid', 'Paid'), ('void', 'Void')]
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    doctor = models.ForeignKey('configuration.Doctor', on_delete=models.PROTECT, related_name='payables')
+    appointment = models.OneToOneField('appointments.Appointment', on_delete=models.PROTECT, related_name='doctor_payable')
+    source_payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name='doctor_payables')
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default='LKR')
+    version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=12, choices=STATUSES, default='versioned')
+    created_at = models.DateTimeField(auto_now_add=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    class Meta:
+        indexes = [models.Index(fields=['facility', 'doctor', 'status'])]
+
+
+class SettlementBatch(models.Model):
+    STATUSES = [('draft', 'Draft'), ('review', 'Review'), ('approved', 'Approved'), ('paid', 'Paid')]
+    facility = models.ForeignKey('configuration.Facility', on_delete=models.PROTECT)
+    reference = models.CharField(max_length=128)
+    currency = models.CharField(max_length=3, default='LKR')
+    adjustment = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    status = models.CharField(max_length=12, choices=STATUSES, default='draft')
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='settlement_batches')
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.PROTECT, related_name='approved_settlements')
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['facility', 'reference'], name='finance_settlement_reference_once')]
+
+
+class SettlementLine(models.Model):
+    batch = models.ForeignKey(SettlementBatch, on_delete=models.PROTECT, related_name='lines')
+    payable = models.ForeignKey(DoctorPayable, null=True, blank=True, on_delete=models.PROTECT, related_name='settlement_lines')
+    doctor = models.ForeignKey('configuration.Doctor', on_delete=models.PROTECT)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    adjustment = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    description = models.CharField(max_length=240, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
