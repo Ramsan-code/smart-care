@@ -6,3 +6,5 @@
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
 
 @media(max-width:767px){.hero-visual{height:430px}.label-patient{top:65px}.label-team{top:270px}.label-clinic{bottom:38px}}
+
+.booking-layout{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:24px;padding-bottom:40px}.booking-layout>*{min-width:0}.slot-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.slot-choice{display:flex;flex-direction:column;text-align:left;padding:14px;background:#fff;border:1px solid #cad4cb;border-radius:9px;gap:4px;color:var(--ink)}.slot-choice:hover:not(:disabled){border-color:var(--green);background:#eef5ef}.slot-choice:disabled{opacity:.55;cursor:not-allowed}.fee-breakdown{display:grid;grid-template-columns:1fr auto;gap:10px}.main-nav{flex-wrap:wrap;gap:12px}.header-inner{gap:20px}#hold-summary,#booking-success{overflow-wrap:anywhere}@media(max-width:1000px){.booking-layout{grid-template-columns:1fr}.header-inner{flex-wrap:wrap}.main-nav{order:3;width:100%;margin-left:0}.header-account{margin-left:auto}}

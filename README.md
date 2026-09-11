@@ -1,6 +1,6 @@
-# Smart Care — Phase 2
+# Smart Care — Phase 3
 
-Django foundation for the Smart Care clinic demo: accounts and verification, consent history, facility-scoped roles, configuration, immutable effective-dated fees and policies, audit history, and a transactional outbox. Booking and payments belong to later phases.
+Django foundation for the Smart Care clinic demo: accounts and verification, consent history, facility-scoped roles, configuration, immutable effective-dated fees and policies, audit history, and a transactional outbox. Phase 3 adds shared scheduling, expiring holds, counter-due bookings and appointment history. Payments and appointment changes belong to Phase 4.
 
 ## Run this workspace
 
@@ -35,7 +35,17 @@ With local services running:
 .venv/bin/python -m pip check
 ```
 
-Tests create and destroy a separate `test_smartcare` database. The live application database is preserved. See `PHASE_2_TEST_REPORT.md` for verified results and limits.
+Tests create and destroy a separate `test_smartcare` database. The live application database is preserved. See `PHASE_3_TEST_REPORT.md` for the latest verified results and limits; `PHASE_2_TEST_REPORT.md` records the foundation baseline.
 
 The GitHub Actions workflow specifies Python 3.12, MariaDB 11.4 and Redis 7. It requires a repository push to execute and has not been run remotely.
-# smart-care
+
+## Use Phase 3
+
+- Patients: sign in, open **Book a visit**, choose an available time, accept the displayed consent and confirm **Pay at counter**. Verify your email through the demo inbox first if required.
+- Reception: open **Book a visit**, select or create a patient, then reserve and confirm. Patient lookup and booking-reference lookup are available on the same screen.
+- Administrators: use **Publish slots** after configuring working hours, fees, policies and leave. Startup also publishes a rolling 30-day window, preserving existing sessions and appointments.
+- **Appointments** shows permitted booking history and saved fee details.
+
+Availability refreshes every 15 seconds; holds expire after the configured interval (five minutes by default). The database rechecks every booking, so an old browser view cannot double-book a slot. Confirmation outbox events are acknowledged locally; no real notification or payment occurs.
+
+API contracts and generation commands: `PHASE_3_API.md`.

@@ -3,8 +3,20 @@ from django.contrib.auth import views as auth_views
 from django.urls import path
 from accounts import views as account_views, api
 from core import views
+from scheduling.api import AvailabilityView
+from appointments.api import HoldsView, HoldDetailView, AppointmentsView, AppointmentDetailView
+from scheduling import views as booking_views
 
 urlpatterns=[
+    path('book/', booking_views.book, name='book'),
+    path('appointments/', booking_views.history, name='appointments'),
+    path('appointments/<uuid:pk>/', booking_views.detail, name='appointment-detail'),
+    path('schedule/publish/', booking_views.publish, name='publish-schedule'),
+    path('api/v1/availability/', AvailabilityView.as_view()),
+    path('api/v1/holds/', HoldsView.as_view()),
+    path('api/v1/holds/<uuid:pk>/', HoldDetailView.as_view()),
+    path('api/v1/appointments/', AppointmentsView.as_view()),
+    path('api/v1/appointments/<uuid:pk>/', AppointmentDetailView.as_view()),
     path('',views.home,name='home'),path('workspace/',views.workspace,name='workspace'),
     path('configuration/',views.configuration_overview,name='configuration'),path('audit/',views.audit_log,name='audit'),
     path('team/',account_views.staff,name='staff'),path('team/<int:pk>/toggle/',account_views.toggle_membership,name='toggle-membership'),

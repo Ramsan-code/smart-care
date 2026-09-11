@@ -70,6 +70,8 @@ if '--services-only' in sys.argv:
     except KeyboardInterrupt: sys.exit(0)
 subprocess.run([sys.executable,'manage.py','migrate','--noinput'],cwd=ROOT,env=env,check=True)
 subprocess.run([sys.executable,'manage.py','seed_demo'],cwd=ROOT,env=env,check=True)
+from datetime import date
+subprocess.run([sys.executable,'manage.py','generate_slots','--start-date',date.today().isoformat(),'--days','30'],cwd=ROOT,env=env,check=True)
 start('worker',[sys.executable,'-m','celery','-A','smartcare','worker','--pool=solo','--loglevel=info','--hostname=smartcare@%h'])
 start('beat',[sys.executable,'-m','celery','-A','smartcare','beat','--loglevel=info','--schedule',str(runtime/'celerybeat')])
 os.chdir(ROOT)

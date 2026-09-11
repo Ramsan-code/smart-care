@@ -1,5 +1,5 @@
 // Progressive enhancement: server-rendered forms work without JavaScript.
-document.querySelectorAll('form').forEach((form) => {
+document.querySelectorAll('form:not([data-async])').forEach((form) => {
   form.addEventListener('submit', () => {
     if (!form.checkValidity()) return;
     const button = form.querySelector('button[type="submit"], button:not([type])');

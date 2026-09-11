@@ -11,7 +11,7 @@ ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
 INSTALLED_APPS = [
     'django.contrib.admin', 'django.contrib.auth', 'django.contrib.contenttypes',
     'django.contrib.sessions', 'django.contrib.messages', 'django.contrib.staticfiles',
-    'rest_framework', 'accounts', 'configuration', 'core',
+    'rest_framework', 'accounts', 'configuration', 'core', 'scheduling', 'appointments',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware', 'django.contrib.sessions.middleware.SessionMiddleware',
@@ -80,3 +80,5 @@ REST_FRAMEWORK = {
 LOGGING = {'version': 1, 'disable_existing_loggers': False,
            'handlers': {'console': {'class': 'logging.StreamHandler'}},
            'root': {'handlers': ['console'], 'level': 'INFO'}}
+
+CELERY_BEAT_SCHEDULE['hold-expiry'] = {'task': 'appointments.tasks.expire_reservations', 'schedule': 30.0}

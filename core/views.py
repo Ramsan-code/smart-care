@@ -62,15 +62,15 @@ def audit_log(request):
 class CatalogView(APIView):
     permission_classes=[AllowAny]
     def get(self,request):
-        key='catalog:v1'
+        key='catalog:v3'
         try: data=cache.get(key)
         except Exception: data=None
         if data is None:
             facilities=Facility.objects.filter(active=True,accepts_registration=True)
             data={'facilities':list(facilities.values('id','name','timezone','currency')),
                   'doctors':list(Doctor.objects.filter(facility__in=facilities,active=True,verified=True).values('id','name','specialty__name','facility_id')),
-                  'services':list(Service.objects.filter(facility__in=facilities,active=True).values('id','name','duration_minutes')),
-                  'booking_available':False,'phase':2}
+                  'services':list(Service.objects.filter(facility__in=facilities,active=True).values('id','name','duration_minutes','facility_id')),
+                  'booking_available':True,'phase':3}
             try: cache.set(key,data,30)
             except Exception: pass
         return Response(data)

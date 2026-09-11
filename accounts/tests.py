@@ -30,7 +30,8 @@ class AccountTests(TestCase):
     def test_home_is_public_and_honest(self):
         response=self.client.get('/')
         self.assertContains(response,'A calmer day')
-        self.assertContains(response,'Booking comes in Phase 3')
+        self.assertContains(response,'Book now and pay at the counter')
+        self.assertContains(response,'Online payments arrive in Phase 4')
     def test_unauthenticated_api_is_401(self): self.assertEqual(self.api.get('/api/v1/me/').status_code,401)
     def test_all_role_workspaces_render(self):
         for role,user in self.users.items():

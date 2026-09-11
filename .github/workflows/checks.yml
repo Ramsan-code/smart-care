@@ -1,4 +1,4 @@
-name: Phase 2 checks
+name: Smart Care checks
 on: [push, pull_request]
 jobs:
   test:

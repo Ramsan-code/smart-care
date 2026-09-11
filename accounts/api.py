@@ -70,10 +70,13 @@ class PatientList(generics.ListCreateAPIView):
     serializer_class=StaffPatientSerializer
     def get_queryset(self):
         if self.request.user.role!='reception': raise PermissionDenied
-        qs=patient_scope(self.request.user).order_by('name')
+        qs=patient_scope(self.request.user).order_by('name','pk')
+        if 'facility_id' in self.request.query_params:
+            facility_id=serializers.IntegerField(min_value=1).run_validation(self.request.query_params['facility_id'])
+            qs=qs.filter(facility_id=facility_id)
         if q:=self.request.query_params.get('q'):
             from django.db.models import Q
-            qs=qs.filter(Q(name__icontains=q)|Q(email__iexact=q))
+            qs=qs.filter(Q(name__icontains=q)|Q(email__iexact=q)|Q(phone__iexact=q))
         return qs
     def list(self,request,*args,**kwargs):
         result=super().list(request,*args,**kwargs)
@@ -83,6 +86,24 @@ class PatientList(generics.ListCreateAPIView):
             item.pop('date_of_birth',None); item.pop('assistance',None)
         audit(request.user,'patients.searched','patients',detail={'count':result.data['count']})
         return result
+    def create(self,request,*args,**kwargs):
+        # Staff creation can be retried safely from the inline booking workspace.
+        if request.user.role!='reception' or not list(facility_ids(request.user)): raise PermissionDenied
+        serializer=self.get_serializer(data=request.data); serializer.is_valid(raise_exception=True)
+        def create_patient():
+            values=serializer.validated_data
+            possible_duplicate=Patient.objects.filter(facility=values['facility'],name__iexact=values['name']).exists()
+            patient=serializer.save()
+            audit(request.user,'patient.created',patient.pk,patient.facility)
+            return {**dict(self.get_serializer(patient).data),'possible_duplicate':possible_duplicate}
+        key=request.headers.get('Idempotency-Key')
+        if key:
+            try: result=execute_once(request.user,'patient.create',key,dict(request.data),create_patient)
+            except DjangoValidationError as exc: return Response({'code':'idempotency_conflict','message':'; '.join(exc.messages)},status=409)
+        else:
+            with transaction.atomic(): result=create_patient()
+        return Response(result,status=201)
+
     def perform_create(self,serializer):
         if self.request.user.role!='reception' or not list(facility_ids(self.request.user)): raise PermissionDenied
         with transaction.atomic():
