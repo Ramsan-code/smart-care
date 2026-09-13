@@ -1,0 +1,139 @@
+name: smartcare-staging
+x-app: &app
+  image: smartcare-app:${RELEASE_TAG:-local}
+  build: {context: .., target: app}
+  init: true
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  stop_grace_period: 45s
+  restart: unless-stopped
+  networks: [backend]
+  environment: &environment
+    DJANGO_SETTINGS_MODULE: smartcare.settings_staging
+    APP_ENV: staging
+    ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost}
+    CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-https://localhost:8443}
+    DJANGO_SECRET_KEY_FILE: /run/secrets/django_key
+    DB_PASSWORD_FILE: /run/secrets/runtime_db_password
+    HEALTH_TOKEN_FILE: /run/secrets/health_token
+    DB_HOST: db
+    DB_PORT: '3306'
+    DB_NAME: smartcare
+    DB_USER: smartcare_runtime
+    REDIS_URL: redis://redis:6379/0
+    REDIS_CACHE_URL: redis://redis:6379/1
+    OPERATIONS_REDIS_URL: redis://redis:6379/2
+    PAYMENT_PROVIDER: disabled
+  secrets: [django_key, runtime_db_password, health_token]
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_healthy}
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_admin_password
+      MARIADB_DATABASE: smartcare
+    secrets: [db_admin_password]
+    volumes: [database:/var/lib/mysql]
+    networks: [backend]
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes', --appendfsync, everysec]
+    volumes: [broker:/data]
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+  provision:
+    <<: *app
+    profiles: [release]
+    restart: 'no'
+    environment:
+      <<: *environment
+      DB_USER: root
+      DB_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets: [django_key, health_token, db_admin_password, runtime_db_password, backup_db_password]
+    command: [python, scripts/operations/provision_db.py]
+  migrate:
+    <<: *app
+    profiles: [release]
+    restart: 'no'
+    environment:
+      <<: *environment
+      DB_USER: root
+      DB_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets: [django_key, health_token, db_admin_password]
+    command: [python, scripts/operations/migrate_once.py]
+  web:
+    <<: *app
+    volumes: [socket:/run/smartcare]
+    healthcheck:
+      test: [CMD, python, scripts/operations/probe.py, live]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  worker:
+    <<: *app
+    stop_grace_period: 75s
+    command: [celery, -A, smartcare, worker, --loglevel=INFO, --concurrency=2, --hostname=staging@%h]
+    healthcheck:
+      test: [CMD, python, scripts/operations/probe.py, worker]
+      interval: 15s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+  beat:
+    <<: *app
+    command: [celery, -A, smartcare, beat, --loglevel=INFO, --schedule=/var/lib/smartcare/beat]
+    volumes: [scheduler:/var/lib/smartcare]
+    healthcheck:
+      test: [CMD, python, scripts/operations/probe.py, scheduler]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+  proxy:
+    stop_signal: SIGQUIT
+    stop_grace_period: 35s
+    image: smartcare-proxy:${RELEASE_TAG:-local}
+    build: {context: .., target: proxy}
+    ports: ['127.0.0.1:8443:8443']
+    secrets: [tls_cert, tls_key]
+    volumes: [socket:/run/smartcare:ro]
+    networks: [frontend]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on: [web]
+networks:
+  backend: {internal: true}
+  frontend: {}
+volumes:
+  database: {}
+  broker: {}
+  scheduler: {}
+  socket: {}
+secrets:
+  django_key: {file: ../.runtime/staging-secrets/django_key}
+  runtime_db_password: {file: ../.runtime/staging-secrets/runtime_db_password}
+  db_admin_password: {file: ../.runtime/staging-secrets/db_admin_password}
+  health_token: {file: ../.runtime/staging-secrets/health_token}
+  tls_cert: {file: ../.runtime/staging-secrets/tls_cert}
+  tls_key: {file: ../.runtime/staging-secrets/tls_key}
+
+  backup_db_password: {file: ../.runtime/staging-secrets/backup_db_password}

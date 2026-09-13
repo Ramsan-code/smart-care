@@ -1,0 +1,42 @@
+x-isolated: &isolated
+  DJANGO_SETTINGS_MODULE: smartcare.settings_isolated
+  APP_ENV: isolated
+  DB_NAME: smartcare_sandbox
+  ISOLATED_TEST: 'true'
+  ISOLATED_PROVIDER_URL: http://test-provider:8099
+  PAYMENT_CALLBACK_SECRET_FILE: /run/secrets/payment_callback_secret
+services:
+  db:
+    environment:
+      MARIADB_DATABASE: smartcare_sandbox
+  web:
+    environment: *isolated
+    secrets: [payment_callback_secret]
+  worker:
+    environment: *isolated
+    secrets: [payment_callback_secret]
+  beat:
+    environment: *isolated
+    secrets: [payment_callback_secret]
+  provision:
+    environment: *isolated
+    secrets: [payment_callback_secret]
+  migrate:
+    environment: *isolated
+    secrets: [payment_callback_secret]
+  test-provider:
+    image: smartcare-app:${RELEASE_TAG:-local}
+    command: [python, scripts/operations/isolated_provider.py]
+    environment:
+      ISOLATED_TEST: 'true'
+      PROVIDER_BIND: 0.0.0.0
+      PROVIDER_LEDGER: /var/lib/smartcare/provider.sqlite3
+      PAYMENT_CALLBACK_SECRET_FILE: /run/secrets/payment_callback_secret
+    secrets: [payment_callback_secret]
+    volumes: [provider:/var/lib/smartcare]
+    networks: [backend]
+    restart: unless-stopped
+volumes:
+  provider: {}
+secrets:
+  payment_callback_secret: {file: ../.runtime/staging-secrets/payment_callback_secret}

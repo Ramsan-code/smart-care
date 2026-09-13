@@ -21,6 +21,7 @@ class Delivery(models.Model):
     )
     event = models.CharField(max_length=16, choices=EVENTS)
     channel = models.CharField(max_length=12, default="sms")
+    body = models.TextField(blank=True)
     destination = models.CharField(max_length=32)
     masked_destination = models.CharField(max_length=32)
     status = models.CharField(max_length=12, choices=STATUSES, default="queued")

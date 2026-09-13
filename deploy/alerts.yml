@@ -1,0 +1,45 @@
+groups:
+  - name: smartcare-provisional
+    rules:
+      - alert: SmartCareDependencyUnavailable
+        expr: smartcare_component_up == 0
+        for: 2m
+        labels: {severity: critical, owner: platform, threshold_status: provisional}
+        annotations:
+          summary: A required dependency or processing heartbeat is unavailable.
+          runbook: docs/STAGING_RUNBOOKS.md#dependency-or-heartbeat-failure
+      - alert: SmartCareOutboxStalled
+        expr: smartcare_outbox_oldest_seconds > 120
+        for: 5m
+        labels: {severity: warning, owner: operations, threshold_status: provisional}
+        annotations:
+          summary: Committed work is older than the provisional recovery window.
+          runbook: docs/STAGING_RUNBOOKS.md#outbox-or-notification-failure
+      - alert: SmartCareRefundUncertain
+        expr: smartcare_refund_unknown > 0
+        for: 1m
+        labels: {severity: critical, owner: finance, threshold_status: provisional}
+        annotations:
+          summary: Refund outcome is unknown; preserve its operation identity and reserved balance.
+          runbook: docs/STAGING_RUNBOOKS.md#financial-reconciliation
+      - alert: SmartCareDeadLetters
+        expr: smartcare_outbox_dead_letters > 0 or smartcare_notification_exhausted > 0
+        for: 1m
+        labels: {severity: warning, owner: communications, threshold_status: provisional}
+        annotations:
+          summary: Work exhausted its retry budget and needs an assigned operator.
+          runbook: docs/STAGING_RUNBOOKS.md#outbox-or-notification-failure
+      - alert: SmartCareServerErrorRate
+        expr: rate(smartcare_server_errors_total[5m]) / clamp_min(rate(smartcare_requests_total[5m]), 0.01) > 0.02
+        for: 5m
+        labels: {severity: warning, owner: platform, threshold_status: provisional}
+        annotations:
+          summary: Application errors exceed the provisional two-percent threshold.
+          runbook: docs/STAGING_RUNBOOKS.md#failed-release
+      - alert: SmartCareSlowRequests
+        expr: histogram_quantile(0.95, rate(smartcare_request_seconds_bucket[5m])) > 1
+        for: 5m
+        labels: {severity: warning, owner: platform, threshold_status: provisional}
+        annotations:
+          summary: Application request p95 exceeds a provisional one second.
+          runbook: docs/STAGING_RUNBOOKS.md#dependency-or-heartbeat-failure

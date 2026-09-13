@@ -27,6 +27,10 @@ class AuditEvent(models.Model):
 class OutboxEvent(models.Model):
     key = models.CharField(max_length=160, unique=True)
     topic = models.CharField(max_length=80)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=240, blank=True)
+    failure_owner = models.CharField(max_length=32, blank=True)
+    dead_lettered_at = models.DateTimeField(null=True, blank=True)
     payload = models.JSONField(default=dict)
     available_at = models.DateTimeField(default=timezone.now)
     processed_at = models.DateTimeField(null=True, blank=True)

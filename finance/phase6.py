@@ -6,9 +6,10 @@ Rows are matched to a payment by transaction reference, amount and succeeded sta
 import csv
 import hashlib
 import io
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 from django.db import transaction
+from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
 
@@ -19,8 +20,8 @@ from configuration.models import Facility
 from core.services import audit
 from scheduling.services import BookingError
 from .models import (DoctorPayable, ExceptionNote, FinanceException, GatewayImport,
-                     GatewayImportRow, Payment, SettlementBatch, SettlementLine)
-from .services import require_exception_staff, require_finance_staff, raise_exception
+                     GatewayImportRow, Payment, SettlementBatch, SettlementLine, SettlementMutex)
+from .services import require_exception_staff, require_finance_staff, raise_exception, funding_payments
 
 
 def _facility(user, facility_id):
@@ -41,6 +42,11 @@ def _settlement_staff(user, facility_id=None, require_approver=False):
             facility_id=facility_id, active=True, finance_approver=True).exists():
         raise BookingError('forbidden', 'A finance approver is required.', 403)
     return facility_id
+
+
+def lock_settlements(facility_id):
+    mutex, _ = SettlementMutex.objects.get_or_create(facility_id=facility_id)
+    SettlementMutex.objects.select_for_update().get(pk=mutex.pk)
 
 
 @transaction.atomic
@@ -104,20 +110,19 @@ def gateway_import_data(batch):
 @transaction.atomic
 def create_payables(user, facility_id):
     facility_id = _facility(user, facility_id)
+    lock_settlements(facility_id)
     appointments = Appointment.objects.filter(facility_id=facility_id, state='completed',
                                                 payment_state='paid').select_related('doctor', 'service')
     created = []
     for appointment in appointments:
         if FinanceException.objects.filter(appointment=appointment).exclude(status='resolved').exists():
             continue
-        payment = Payment.objects.filter(appointment=appointment, kind='charge', status='succeeded').order_by('created_at').first()
+        payment = funding_payments(appointment).order_by('created_at', 'pk').first()
         if not payment or DoctorPayable.objects.filter(appointment=appointment).exists():
             continue
         amount = appointment.snapshot.get('doctor_fee')
         if amount is None:
-            fee = FeeVersion.objects.filter(facility_id=facility_id, service_id=appointment.service_id,
-                                             effective_from__lte=appointment.starts_at.date()).order_by('-effective_from').first()
-            amount = fee.doctor_fee if fee else 0
+            raise BookingError('validation', 'Stored doctor fee breakdown is required; reconcile this appointment before creating a payable.')
         created.append(DoctorPayable.objects.create(
             facility_id=facility_id, doctor=appointment.doctor, appointment=appointment,
             source_payment=payment, amount=Decimal(amount), currency=payment.currency))
@@ -137,33 +142,77 @@ def doctor_statement(user, doctor_id=None):
 
 
 @transaction.atomic
-def create_settlement(user, facility_id, reference, adjustment=0):
+def create_settlement(user, facility_id, reference, adjustment=0, currency='LKR'):
     facility_id = _settlement_staff(user, facility_id)
+    # Serializes settlement creation, adjustments and transitions within a facility.
+    lock_settlements(facility_id)
+    value = Decimal(adjustment)
+    if value != 0:
+        raise BookingError('validation', 'Use a linked refund adjustment instead of an unbacked batch adjustment.')
+    existing = SettlementBatch.objects.filter(facility_id=facility_id, reference=reference).first()
+    if existing:
+        if existing.created_by_id != user.pk or existing.currency != currency or existing.adjustment != value:
+            raise BookingError('idempotency_conflict', 'Settlement reference already used with different input.')
+        return settlement_data(existing)
+    payables = list(DoctorPayable.objects.select_for_update().filter(
+        facility_id=facility_id, currency=currency, status='versioned',
+        original_allocation__isnull=True).order_by('pk'))
     batch = SettlementBatch.objects.create(facility_id=facility_id, reference=reference,
-                                            adjustment=Decimal(adjustment), created_by=user)
-    for payable in DoctorPayable.objects.filter(facility_id=facility_id, status='versioned').exclude(
-            settlement_lines__isnull=False):
-        SettlementLine.objects.create(batch=batch, payable=payable, doctor=payable.doctor, amount=payable.amount)
-    audit(user, 'settlement.created', batch.pk, batch.facility, {'adjustment': str(batch.adjustment)})
+        currency=currency, adjustment=value, created_by=user)
+    for payable in payables:
+        if payable.source_payment.currency != currency or payable.source_payment.facility_id != facility_id:
+            raise BookingError('validation', 'Payable source payment has a different facility or currency.')
+        SettlementLine.objects.create(batch=batch, payable=payable, original_payable=payable,
+                                      doctor=payable.doctor, amount=payable.amount)
+    audit(user, 'settlement.created', batch.pk, batch.facility, {'currency': currency})
     return settlement_data(batch)
 
 
 @transaction.atomic
-def add_refund_adjustment(user, paid_batch_id, payable_id, amount):
-    """Create a new negative line; the original paid batch is never changed."""
-    source = DoctorPayable.objects.select_related('facility', 'doctor').get(pk=payable_id)
-    old = SettlementBatch.objects.get(pk=paid_batch_id, status='paid', facility=source.facility)
-    require_finance_staff(user, source.facility_id)
+def add_refund_adjustment(user, paid_batch_id, payable_id, amount, refund_id):
+    hint = DoctorPayable.objects.filter(pk=payable_id).first()
+    if not hint:
+        raise BookingError('not_found', 'Payable not found.', 404)
+    _settlement_staff(user, hint.facility_id)
+    lock_settlements(hint.facility_id)
+    source = DoctorPayable.objects.select_for_update().get(pk=payable_id)
+    original = SettlementLine.objects.filter(batch_id=paid_batch_id,
+        batch__status='paid', batch__facility_id=source.facility_id,
+        original_payable=source, kind='original').select_related('batch').first()
+    if not original:
+        raise BookingError('validation', 'Payable must belong to the specified paid settlement.')
+    refund = Payment.objects.filter(pk=refund_id, appointment_id=source.appointment_id,
+        facility_id=source.facility_id, currency=source.currency, kind='refund', status='succeeded').first()
+    if not refund or original.batch.currency != source.currency:
+        raise BookingError('validation', 'A successful refund in the same appointment, facility and currency is required.')
     value = Decimal(amount)
-    if value <= 0 or value > source.amount:
-        raise BookingError('validation', 'Refund adjustment must be positive and within payable amount.')
+    prior = SettlementLine.objects.filter(refund=refund).first()
+    if prior:
+        if prior.original_line_id != original.pk or prior.payable_id != source.pk or prior.amount != -value:
+            raise BookingError('idempotency_conflict', 'Refund already allocated with different input.')
+        return settlement_data(prior.batch)
+    # Pro rata doctor share, rounded down per refund; never silently assign the whole refund to the doctor.
+    snapshot = source.appointment.snapshot
+    try:
+        total = Decimal(snapshot['total'])
+        doctor_fee = Decimal(snapshot['doctor_fee'])
+    except (KeyError, InvalidOperation, TypeError):
+        raise BookingError('validation', 'Immutable fee breakdown is required for a refund adjustment.')
+    if not total.is_finite() or not doctor_fee.is_finite() or not 0 < doctor_fee <= total or source.amount > doctor_fee:
+        raise BookingError('validation', 'Invalid payable fee breakdown; finance review is required.')
+    eligible = (refund.amount * source.amount / total).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+    allocated = -(SettlementLine.objects.filter(payable=source, kind='refund').aggregate(
+        total=Sum('amount'))['total'] or Decimal('0'))
+    if not value.is_finite() or value <= 0 or value > eligible or allocated + value > source.amount:
+        raise BookingError('validation', 'Adjustment exceeds the eligible doctor share or remaining payable balance.')
     batch = SettlementBatch.objects.create(
-        facility=source.facility, reference=f'REFUND-{old.reference}-{source.pk}',
+        facility_id=source.facility_id, reference=f'REFUND-{refund.pk}',
         currency=source.currency, created_by=user)
     SettlementLine.objects.create(batch=batch, payable=source, doctor=source.doctor,
-                                  amount=-value, description=f'Refund after settlement {old.reference}')
+        kind='refund', original_line=original, refund=refund,
+        amount=-value, description=f'Refund adjustment for settlement {original.batch_id}')
     audit(user, 'settlement.refund_adjustment', batch.pk, batch.facility,
-          {'original_batch': old.pk, 'payable': source.pk, 'amount': str(value)})
+          {'original_batch': original.batch_id, 'payable': source.pk, 'refund': str(refund.pk), 'amount': str(value)})
     return settlement_data(batch)
 
 
@@ -171,16 +220,23 @@ def settlement_data(batch):
     total = sum((line.amount + line.adjustment for line in batch.lines.all()), Decimal('0'))
     total += batch.adjustment
     return {'id': batch.pk, 'reference': batch.reference, 'status': batch.status,
-            'adjustment': str(batch.adjustment), 'total': str(total), 'lines': batch.lines.count()}
+            'currency': batch.currency, 'adjustment': format(batch.adjustment, '.2f'), 'total': format(total, '.2f'), 'lines': batch.lines.count()}
 
 
 @transaction.atomic
 def change_settlement(user, batch_id, action):
-    batch = SettlementBatch.objects.select_for_update().select_related('facility').get(pk=batch_id)
+    hint = SettlementBatch.objects.filter(pk=batch_id).first()
+    if not hint:
+        raise BookingError('not_found', 'Settlement not found.', 404)
+    _settlement_staff(user, hint.facility_id)
+    lock_settlements(hint.facility_id)
+    batch = SettlementBatch.objects.select_for_update().get(pk=batch_id)
     _settlement_staff(user, batch.facility_id, require_approver=(action == 'approve'))
     if action == 'review' and batch.status == 'draft':
         batch.status = 'review'
     elif action == 'approve':
+        if batch.created_by_id == user.pk:
+            raise BookingError('forbidden', 'A different finance approver must approve this settlement.', 403)
         if user.role != 'administrator' and not user.memberships.filter(
                 facility=batch.facility, active=True, finance_approver=True).exists():
             raise BookingError('forbidden', 'A finance approver is required.', 403)
@@ -189,7 +245,7 @@ def change_settlement(user, batch_id, action):
     elif action == 'paid':
         if batch.status != 'approved': raise BookingError('state_conflict', 'Batch must be approved.')
         batch.status, batch.paid_at = 'paid', timezone.now()
-        for line in batch.lines.select_related('payable'):
+        for line in batch.lines.filter(kind='original').select_related('payable'):
             line.payable.status, line.payable.paid_at = 'paid', batch.paid_at
             line.payable.save(update_fields=['status', 'paid_at'])
     else: raise BookingError('validation', 'Unsupported settlement action.')
@@ -208,6 +264,8 @@ def export_settlement(user, batch_id):
     for line in batch.lines.select_related('payable'):
         writer.writerow([line.doctor_id, line.payable.appointment_id if line.payable else '',
                          line.amount, line.adjustment, batch.currency])
+    if batch.adjustment:
+        writer.writerow(['', '', '0.00', batch.adjustment, batch.currency])
     return response
 
 

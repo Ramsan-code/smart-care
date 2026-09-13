@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+.venv
+.runtime
+__pycache__
+*.pyc
+demo-credentials.txt
+outputs

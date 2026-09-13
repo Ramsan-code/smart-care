@@ -48,8 +48,7 @@ def lock_slots(slot_ids):
         Doctor.objects.select_for_update().get(pk=doctor_id)
     for session_id in sorted({h['session_id'] for h in hints}):
         Session.objects.select_for_update().get(pk=session_id)
-    locked = {s.pk: s for s in Slot.objects.select_for_update().select_related(
-        'session__facility', 'session__doctor', 'session__service').filter(pk__in=wanted)}
+    locked = {s.pk: s for s in Slot.objects.select_for_update().filter(pk__in=wanted).order_by('pk')}
     return [locked[slot_id] for slot_id in slot_ids]
 
 
@@ -133,8 +132,12 @@ def command(user, operation, key, payload, action):
         except ValidationError as exc:
             raise BookingError('idempotency_conflict', '; '.join(exc.messages)) from exc
         except OperationalError as exc:
-            if exc.args[0] not in (1205, 1213) or attempt == 2:
+            if exc.args[0] not in (1205, 1213):
+                raise
+            if attempt == 2:
                 raise BookingError('retryable', 'Database busy; retry using the same request key.', 503) from exc
+            from operations.telemetry import count
+            count('database_retries')
             time.sleep(.03 * (attempt + 1))
 
 

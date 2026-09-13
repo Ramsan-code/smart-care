@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import path
@@ -70,7 +71,6 @@ urlpatterns=[
     path('api/v1/appointments/', AppointmentsView.as_view()),
     path('api/v1/appointments/<uuid:pk>/', AppointmentDetailView.as_view()),
     path('api/v1/payments/checkouts/', CheckoutView.as_view()),
-    path('api/v1/payments/checkouts/<uuid:pk>/simulate/', CheckoutSimulationView.as_view()),
     path('api/v1/payments/callback/', CallbackView.as_view()),
     path('api/v1/appointments/<uuid:pk>/payments/counter/', CounterPaymentView.as_view()),
     path('api/v1/appointments/<uuid:pk>/payments/', PaymentHistoryView.as_view()),
@@ -84,8 +84,8 @@ urlpatterns=[
     path('api/v1/finance/payables/', PayablesView.as_view()),
     path('api/v1/finance/doctor/statement/', DoctorStatementView.as_view()),
     path('api/v1/finance/settlements/', SettlementView.as_view()),
-    path('api/v1/finance/settlements/<int:pk>/<str:action>/', SettlementActionView.as_view()),
     path('api/v1/finance/settlements/<int:pk>/export/', SettlementExportView.as_view()),
+    path('api/v1/finance/settlements/<int:pk>/<str:action>/', SettlementActionView.as_view()),
     path('api/v1/finance/settlements/refund-adjustments/', RefundAdjustmentView.as_view()),
     path('api/v1/finance/reports/operations/', OperationsReportView.as_view()),
     path('api/v1/communications/deliveries/', DeliveryListView.as_view()),
@@ -108,3 +108,10 @@ urlpatterns=[
     path('api/v1/patients/',api.PatientList.as_view()),path('api/v1/patients/<uuid:pk>/',api.PatientDetail.as_view()),
     path('api/v1/catalog/',views.CatalogView.as_view()),path('api/v1/health/',views.health,name='health'),
 ]
+
+if settings.DEBUG and settings.DEMO_MODE:
+    urlpatterns.append(path('api/v1/payments/checkouts/<uuid:pk>/simulate/', CheckoutSimulationView.as_view()))
+
+from operations import views as health
+urlpatterns += [path('health/live/', health.live), path('health/ready/', health.ready),
+                path('ops/components/', health.components), path('ops/metrics/', health.metrics)]

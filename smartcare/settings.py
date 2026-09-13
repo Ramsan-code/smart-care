@@ -3,7 +3,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / '.env')
+APP_ENV = os.getenv('APP_ENV', 'development')
+if APP_ENV in ['development', 'test']:
+    load_dotenv(BASE_DIR / '.env')
 SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 DEBUG = os.getenv('DJANGO_DEBUG', 'false').lower() == 'true'
 DEMO_MODE = os.getenv('DEMO_MODE', 'false').lower() == 'true'
@@ -11,7 +13,7 @@ ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
 INSTALLED_APPS = [
     'django.contrib.admin', 'django.contrib.auth', 'django.contrib.contenttypes',
     'django.contrib.sessions', 'django.contrib.messages', 'django.contrib.staticfiles',
-    'rest_framework', 'accounts', 'configuration', 'core', 'scheduling', 'appointments', 'finance', 'communications',
+    'rest_framework', 'accounts', 'configuration', 'core', 'scheduling', 'appointments', 'finance', 'communications', 'operations',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware', 'django.contrib.sessions.middleware.SessionMiddleware',
@@ -86,3 +88,16 @@ LOGGING = {'version': 1, 'disable_existing_loggers': False,
 
 CELERY_BEAT_SCHEDULE['hold-expiry'] = {'task': 'appointments.tasks.expire_reservations', 'schedule': 30.0}
 CELERY_BEAT_SCHEDULE['appointment-reminders'] = {'task': 'communications.tasks.queue_due_reminders', 'schedule': 60.0}
+
+PAYMENT_PROVIDER = os.getenv('PAYMENT_PROVIDER', 'simulated')
+TEST_PAYMENT_URL = os.getenv('TEST_PAYMENT_URL', 'http://127.0.0.1:8099')
+REFUND_LEASE_SECONDS = int(os.getenv('REFUND_LEASE_SECONDS', '60'))
+REFUND_MAX_ATTEMPTS = 8
+CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': int(os.getenv('CELERY_VISIBILITY_TIMEOUT', '3600'))}
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_BEAT_SCHEDULE['outbox-recovery']['schedule'] = float(os.getenv('OUTBOX_RECOVERY_SECONDS', '15'))
+
+RESTORE_QUARANTINE = False
+OPERATIONS_REDIS_URL = os.getenv('OPERATIONS_REDIS_URL', 'redis://127.0.0.1:6380/2')
+HEALTH_TOKEN = os.getenv('HEALTH_TOKEN', '')
+OPERATIONS_ENABLED = False

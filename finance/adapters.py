@@ -4,6 +4,7 @@ import json
 import uuid
 from decimal import Decimal
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from core.adapters import ProviderResult
 
 
@@ -29,9 +30,21 @@ class SimulatedPaymentAdapter:
             payload = json.loads(body.decode())
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError('malformed') from exc
+        if not isinstance(payload, dict):
+            raise ValueError('malformed')
         required = {'event_id', 'checkout_id', 'provider_reference', 'status', 'amount', 'currency'}
         if not required <= set(payload) or payload['status'] not in ['succeeded', 'failed']:
             raise ValueError('malformed')
+        try:
+            uuid.UUID(str(payload['checkout_id']))
+            amount = Decimal(str(payload['amount']))
+            if not amount.is_finite() or amount <= 0 or amount.as_tuple().exponent < -2:
+                raise ValueError('malformed')
+            for field in ['event_id', 'provider_reference']:
+                if not isinstance(payload[field], str) or not 0 < len(payload[field]) <= 64:
+                    raise ValueError('malformed')
+        except (ValueError, TypeError, ArithmeticError) as exc:
+            raise ValueError('malformed') from exc
         return payload
 
     def callback_body(self, checkout, status, event_id=None):
@@ -48,4 +61,28 @@ class SimulatedPaymentAdapter:
 
 
 def adapter():
+    if settings.RESTORE_QUARANTINE or settings.PAYMENT_PROVIDER == 'disabled':
+        raise ImproperlyConfigured('Financial submissions are disabled.')
+    if settings.PAYMENT_PROVIDER == 'isolated_http':
+        from operations.providers import IsolatedPaymentAdapter, require_isolation
+        require_isolation()
+        return IsolatedPaymentAdapter()
+    if not (settings.DEBUG and settings.DEMO_MODE):
+        raise ImproperlyConfigured('A production payment provider must be configured; simulation requires DEBUG and DEMO_MODE.')
+    if settings.PAYMENT_PROVIDER == 'test_http':
+        return DurableTestPaymentAdapter()
+    if settings.PAYMENT_PROVIDER != 'simulated':
+        raise ImproperlyConfigured('Unknown payment provider.')
     return SimulatedPaymentAdapter()
+
+
+class DurableTestPaymentAdapter(SimulatedPaymentAdapter):
+    """Local failure harness only. Server persists accepted keys in its own database."""
+    def refund(self, *, key, payment_reference, amount):
+        from urllib.request import Request, urlopen
+        request = Request(settings.TEST_PAYMENT_URL + '/refund',
+            data=json.dumps({'key': key, 'payment_reference': payment_reference, 'amount': str(amount)}).encode(),
+            headers={'Content-Type': 'application/json'}, method='POST')
+        with urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+        return ProviderResult(reference=payload['reference'], status=payload['status'])
