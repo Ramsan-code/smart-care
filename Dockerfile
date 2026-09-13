@@ -1,17 +1,25 @@
-FROM python:3.12-slim-bookworm AS app
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends gcc pkg-config default-libmysqlclient-dev mariadb-client openssl && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY requirements.txt requirements-staging.txt ./
-RUN pip install --no-cache-dir -r requirements-staging.txt && pip check
-COPY . .
-RUN DJANGO_SECRET_KEY=build-only-placeholder-not-an-injected-runtime-secret DB_PASSWORD=build-only DJANGO_DEBUG=true DEMO_MODE=true python manage.py collectstatic --noinput     && useradd --uid 10001 --create-home smartcare     && mkdir -p /run/smartcare /var/lib/smartcare && chown -R 10001:10001 /run/smartcare /var/lib/smartcare /app/.runtime
-USER 10001:10001
-CMD ["gunicorn", "-c", "deploy/gunicorn.conf.py", "smartcare.wsgi:application"]
+# For more information, please refer to https://aka.ms/vscode-docker-python
+FROM python:3-slim
 
-FROM nginx:1.28-alpine AS proxy
-COPY deploy/nginx.conf /etc/nginx/nginx.conf
-COPY --from=app /app/.runtime/static /srv/static
-USER 10001:10001
-ENTRYPOINT ["nginx"]
-CMD ["-g", "daemon off;"]
+EXPOSE 8000
+
+# Keeps Python from generating .pyc files in the container
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Turns off buffering for easier container logging
+ENV PYTHONUNBUFFERED=1
+
+# Install pip requirements
+COPY requirements.txt .
+RUN python -m pip install -r requirements.txt
+
+WORKDIR /app
+COPY . /app
+
+# Creates a non-root user with an explicit UID and adds permission to access the /app folder
+# For more info, please refer to https://aka.ms/vscode-docker-python-configure-containers
+RUN adduser -u 5678 --disabled-password --gecos "" appuser && chown -R appuser /app
+USER appuser
+
+# During debugging, this entry point will be overridden. For more information, please refer to https://aka.ms/vscode-docker-python-debug
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "smartcare.wsgi"]
