@@ -60,14 +60,15 @@ def template_text(appointment, event):
     )
 
 
-def queue_delivery(appointment, event):
+def queue_delivery(appointment, event, identity=None):
     destination = appointment.patient.phone
     if not destination:
         return None
-    key = f"sms:{appointment.pk}:{event}:{appointment.version}"
+    key = f"sms:{identity}" if identity else f"sms:{appointment.pk}:{event}:{appointment.version}"
     delivery, _ = Delivery.objects.get_or_create(
         key=key,
         defaults={
+            "body": template_text(appointment, event),
             "facility": appointment.facility,
             "appointment": appointment,
             "event": event,
@@ -79,36 +80,46 @@ def queue_delivery(appointment, event):
 
 
 @transaction.atomic
-def consume_notification_event(payload, event):
+def consume_notification_event(payload, event, identity=None):
     from appointments.models import Appointment
 
-    appointment = Appointment.objects.select_for_update().select_related(
-        "patient", "facility"
-    ).get(pk=payload["appointment_id"])
+    appointment = Appointment.objects.select_for_update().get(pk=payload["appointment_id"])
     if event == "reminder" and appointment.state != "confirmed":
-        delivery = queue_delivery(appointment, event)
+        delivery = queue_delivery(appointment, event, identity)
         if delivery and delivery.status not in ["sent", "suppressed"]:
             delivery.status = "suppressed"
             delivery.failure_owner = "operations"
             delivery.last_error = "Appointment is no longer confirmed."
             delivery.save(update_fields=["status", "failure_owner", "last_error"])
         return delivery
-    delivery = queue_delivery(appointment, event)
+    delivery = queue_delivery(appointment, event, identity)
     if not delivery:
         return None
     return send_delivery(delivery, appointment)
 
 
+@transaction.atomic
 def send_delivery(delivery, appointment=None):
+    from appointments.models import Appointment
+    appointment = Appointment.objects.select_for_update().get(pk=delivery.appointment_id)
     delivery = Delivery.objects.select_for_update().get(pk=delivery.pk)
     if delivery.status in ["sent", "suppressed"]:
         return delivery
     if appointment is None:
         appointment = delivery.appointment
+    if delivery.event in ['confirmation', 'changed', 'reminder'] and appointment.state in ['cancelled', 'rescheduled', 'completed', 'no_show', 'left']:
+        delivery.status = 'suppressed'
+        delivery.last_error = 'Appointment notification is obsolete.'
+        delivery.next_attempt_at = None
+        delivery.save(update_fields=['status', 'last_error', 'next_attempt_at'])
+        return delivery
+    if not delivery.body:
+        delivery.body = template_text(appointment, delivery.event)
+        delivery.save(update_fields=['body'])
     result = adapter().send(
         key=delivery.key,
         destination=delivery.destination,
-        text=template_text(appointment, delivery.event),
+        text=delivery.body or template_text(appointment, delivery.event),
     )
     delivery.retry_count += 1
     if result.status == "succeeded":
@@ -122,7 +133,7 @@ def send_delivery(delivery, appointment=None):
         delivery.status = "failed"
         delivery.failure_owner = "communications"
         delivery.last_error = "SMS provider did not accept the message."
-        delivery.next_attempt_at = timezone.now() + timedelta(minutes=5)
+        delivery.next_attempt_at = timezone.now() + timedelta(minutes=5) if delivery.retry_count < 8 else None
     delivery.save(
         update_fields=[
             "retry_count", "status", "provider_reference", "sent_at",
@@ -134,11 +145,15 @@ def send_delivery(delivery, appointment=None):
     return delivery
 
 
+@transaction.atomic
 def retry_delivery(user, delivery_id):
     delivery = scoped_deliveries(user).filter(pk=delivery_id).first()
     if not delivery:
         from scheduling.services import BookingError
         raise BookingError("not_found", "Notification delivery not found.", 404)
+    from appointments.models import Appointment
+    Appointment.objects.select_for_update().get(pk=delivery.appointment_id)
+    delivery = Delivery.objects.select_for_update().get(pk=delivery.pk)
     if delivery.status != "failed":
         from scheduling.services import BookingError
         raise BookingError("state_conflict", "Only failed notifications can be retried.", 409)

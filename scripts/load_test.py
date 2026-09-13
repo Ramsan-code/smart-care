@@ -51,6 +51,8 @@ def main():
     args = parser.parse_args()
     if args.seconds < 1 or not 1 <= args.users <= 20:
         parser.error('Use a positive duration and 1–20 users.')
+    if connections['default'].vendor != 'mysql':
+        raise SystemExit('MariaDB/InnoDB is required for load invariants.')
     if settings.DATABASES['default']['NAME'] != 'smartcare' or settings.DATABASES['default']['TEST']['NAME'] != 'test_smartcare':
         raise SystemExit('Refusing unexpected database configuration.')
     if not settings.DEBUG or not settings.DEMO_MODE:
@@ -185,7 +187,7 @@ def main():
             result = {'created_at': timezone.now().isoformat(), 'duration_target_seconds': args.seconds,
                       'observed_seconds_including_final_progress_wait': round(elapsed_seconds, 2), 'virtual_users': args.users,
                       'patients': args.users, 'days_of_inventory': 30, 'initial_slots': initial_slots,
-                      'request_count': len(measured), 'unexpected_errors': len(unexpected),
+                      'request_count': len(measured), 'throughput_requests_per_second': round(len(measured) / max(elapsed_seconds, .001), 3), 'unexpected_errors': len(unexpected),
                       'unexpected_error_rate_percent': round(100 * len(unexpected) / max(1, len(measured)), 4),
                       'expected_capacity_conflicts': sum(1 for label, status, _ in measured if label == 'hold' and status == 409),
                       'transport_failures': dict(Counter(failures)), 'metrics': metrics, 'invariants': invariants,
@@ -193,7 +195,7 @@ def main():
                       'pending_outbox_at_finish': OutboxEvent.objects.filter(processed_at__isnull=True).count(),
                       'workload': f'{args.users} authenticated patient sessions; 2-second closed-loop cycles; availability every cycle, history every 10, hold every 6, confirm every 30, otherwise release.',
                       'server': 'Django threaded development WSGI, loopback HTTP, local MariaDB 10.11 and Redis with isolated Celery worker/beat; not a production server benchmark.',
-                      'external_payment_or_message_latency': 'Not applicable: Phase 3 counter-due booking, acknowledgment-only outbox.',
+                      'external_payment_or_message_latency': 'Counter-due booking with the local simulated SMS provider; no real provider latency.',
                       'passed': not unexpected and not failures and not any(invariants.values())}
             Path(args.output).write_text(json.dumps(result, indent=2) + '\n')
             print(json.dumps(result, indent=2), flush=True)

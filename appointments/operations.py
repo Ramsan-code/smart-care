@@ -3,7 +3,8 @@ from django.utils import timezone
 
 from accounts.permissions import facility_ids
 from core.services import audit, enqueue
-from scheduling.models import Session
+from scheduling.models import Session, Slot
+from configuration.models import Doctor
 from scheduling.services import BookingError
 from .models import Appointment, AppointmentHistory, CancellationResolution, SessionCancellation
 from .services import lock_slot
@@ -18,13 +19,13 @@ TRANSITIONS = {
 
 
 def can_operate(user, appointment):
-    if user.role == "administrator":
+    if user.is_superuser:
         return True
     if appointment.facility_id not in set(facility_ids(user)):
         raise BookingError("forbidden", "This appointment is outside your facility scope.", 403)
     if user.role == "doctor" and appointment.doctor.user_id != user.pk:
         raise BookingError("forbidden", "Doctors can only update their own appointments.", 403)
-    if user.role not in ["reception", "doctor"]:
+    if user.role not in ["reception", "doctor", "administrator"]:
         raise BookingError("forbidden", "Outpatient operations access is required.", 403)
     return True
 
@@ -35,7 +36,7 @@ def transition_appointment(user, appointment_id, expected_version, to_state, not
     from finance.services import set_state
     appointment = accessible_appointment(user, appointment_id)
     can_operate(user, appointment)
-    appointment = Appointment.objects.select_for_update().select_related("doctor", "facility").get(pk=appointment.pk)
+    appointment = Appointment.objects.select_for_update().get(pk=appointment.pk)
     if appointment.version != expected_version:
         raise BookingError("stale_version", "This appointment has changed. Refresh before updating.")
     from_state = appointment.state
@@ -56,11 +57,15 @@ def transition_appointment(user, appointment_id, expected_version, to_state, not
 @transaction.atomic
 def cancel_session(user, session_id, expected_version, reason):
     from finance.services import release_capacity, set_state
-    session = Session.objects.select_for_update().select_related("facility").filter(pk=session_id).first()
+    hint = Session.objects.filter(pk=session_id).first()
+    if not hint:
+        raise BookingError("not_found", "Session not found.", 404)
+    Doctor.objects.select_for_update().get(pk=hint.doctor_id)
+    session = Session.objects.select_for_update().filter(pk=session_id).first()
     if not session:
         raise BookingError("not_found", "Session not found.", 404)
     if user.role not in ["reception", "administrator"] or (
-        user.role != "administrator" and session.facility_id not in set(facility_ids(user))
+        not user.is_superuser and session.facility_id not in set(facility_ids(user))
     ):
         raise BookingError("forbidden", "Session operations access is required.", 403)
     if session.version != expected_version:
@@ -73,8 +78,16 @@ def cancel_session(user, session_id, expected_version, reason):
     session.active = False
     session.version += 1
     session.save(update_fields=["active", "version"])
+    slots = list(Slot.objects.select_for_update().filter(session=session).order_by('pk'))
+    from .models import Reservation
+    # Cancel outstanding holds too; a cancelled session must not retain capacity.
+    for slot in slots:
+        if slot.active_reservation_id:
+            reservation = Reservation.objects.select_for_update().get(pk=slot.active_reservation_id)
+            if reservation.status == 'held':
+                release_capacity(slot, reservation)
     appointments = list(
-        Appointment.objects.select_for_update().select_related("reservation", "facility").filter(
+        Appointment.objects.select_for_update().filter(
             reservation__slot__session=session, state="confirmed"
         )
     )
@@ -82,8 +95,9 @@ def cancel_session(user, session_id, expected_version, reason):
     for appointment in appointments:
         paid = None
         try:
-            from finance.services import net_paid, execute_refund
-            paid = net_paid(appointment)
+            from finance.services import appointment_financials, execute_refund
+            from decimal import Decimal
+            paid = Decimal(appointment_financials(appointment)['refundable'])
         except ImportError:
             paid = 0
         release_capacity(lock_slot(appointment.reservation.slot_id), appointment.reservation)
@@ -110,13 +124,11 @@ def cancel_session(user, session_id, expected_version, reason):
 
 @transaction.atomic
 def resolve_cancellation(user, resolution_id, expected_version, status, outcome="", note=""):
-    resolution = CancellationResolution.objects.select_related(
-        "appointment", "cancellation__facility"
-    ).filter(pk=resolution_id).first()
+    resolution = CancellationResolution.objects.select_for_update().filter(pk=resolution_id).first()
     if not resolution:
         raise BookingError("not_found", "Cancellation resolution not found.", 404)
     if user.role not in ["reception", "administrator"] or (
-        user.role != "administrator" and resolution.cancellation.facility_id not in set(facility_ids(user))
+        not user.is_superuser and resolution.cancellation.facility_id not in set(facility_ids(user))
     ):
         raise BookingError("forbidden", "Session operations access is required.", 403)
     if resolution.version != expected_version:

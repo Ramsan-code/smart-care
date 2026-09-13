@@ -5,7 +5,7 @@ Django foundation for the Smart Care clinic demo: accounts and verification, con
 ## Run this workspace
 
 ```bash
-cd /home/ramsan/Documents/Codex/2026-09-11/cr/outputs/smart-care
+cd /path/to/smart-care
 bash start.sh
 ```
 
@@ -31,7 +31,7 @@ With local services running:
 ```bash
 .venv/bin/python manage.py check
 .venv/bin/python manage.py makemigrations --check --dry-run
-.venv/bin/python manage.py test --noinput
+.venv/bin/python manage.py test --debug-mode --noinput
 .venv/bin/python -m pip check
 ```
 
@@ -49,3 +49,10 @@ The GitHub Actions workflow specifies Python 3.12, MariaDB 11.4 and Redis 7. It 
 Availability refreshes every 15 seconds; holds expire after the configured interval (five minutes by default). The database rechecks every booking, so an old browser view cannot double-book a slot. Confirmation outbox events are acknowledged locally; no real notification or payment occurs.
 
 API contracts and generation commands: `PHASE_3_API.md`.
+
+## Booking-to-settlement integrity
+
+See [docs/INTEGRITY.md](docs/INTEGRITY.md) for financial controls, migrations, recovery commands and observed evidence.
+Refund submission is asynchronous: the initial response contains a pending operation ID, not a successful payment.
+The bundled payment providers are demo-only. Production configuration fails with `finance.E001` until a real provider is implemented.
+The test runner uses `--debug-mode` deliberately because this is a demo-only payment configuration; production rejection is tested separately.

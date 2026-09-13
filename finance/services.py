@@ -1,7 +1,9 @@
 import uuid
+import hashlib
 import json
 from datetime import timedelta
 from decimal import Decimal
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -25,11 +27,11 @@ def scoped_finance_appointments(user):
 
 
 def require_finance_staff(user, facility_id=None):
-    if not user.is_authenticated or user.role not in ['reception', 'finance', 'administrator']:
+    if not user.is_authenticated or not user.is_active or user.role not in ['reception', 'finance', 'administrator']:
         raise BookingError('forbidden', 'Staff payment access is required.', 403)
-    if user.role != 'administrator' and not user.memberships.filter(active=True, facility__active=True).exists():
+    if not user.is_superuser and not user.memberships.filter(active=True, facility__active=True).exists():
         raise BookingError('forbidden', 'Staff payment access is required.', 403)
-    if facility_id and user.role != 'administrator' and int(facility_id) not in set(facility_ids(user)):
+    if facility_id and int(facility_id) not in set(facility_ids(user)):
         raise BookingError('forbidden', 'This facility is outside your payment scope.', 403)
 
 
@@ -61,6 +63,22 @@ def net_paid(appointment):
     return money(charges - refunds)
 
 
+def funding_payments(appointment):
+    """Follow immutable replacement links to the actual collected source payments."""
+    ids = []
+    current = appointment
+    while current.pk not in ids:
+        ids.append(current.pk)
+        incoming = AppointmentChange.objects.filter(replacement=current, status='completed').select_related('original').first()
+        if not incoming:
+            break
+        current = incoming.original
+        if current.facility_id != appointment.facility_id:
+            raise BookingError('validation', 'Cross-facility credit requires reconciliation.')
+    return Payment.objects.filter(appointment_id__in=ids, facility_id=appointment.facility_id,
+        currency=appointment.snapshot.get('currency', 'LKR'), kind='charge', status='succeeded')
+
+
 def credited_amount(appointment):
     change = AppointmentChange.objects.filter(replacement=appointment, status='completed').first()
     return money(change.credited_amount) if change else money(0)
@@ -72,8 +90,11 @@ def appointment_financials(appointment):
     total = money(appointment.snapshot['total'])
     covered = paid + credit
     due = max(money(0), total - covered)
-    refundable = max(money(0), paid)
-    pending_refund = RefundObligation.objects.filter(appointment=appointment, status='pending').aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    pending_refund = RefundObligation.objects.filter(appointment=appointment,
+        status__in=['pending', 'submitting', 'unknown']).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+    transferred = AppointmentChange.objects.filter(original=appointment, status='completed',
+        kind='reschedule').aggregate(total=Sum('credited_amount'))['total'] or Decimal('0.00')
+    refundable = max(money(0), paid + credit - pending_refund - transferred)
     return {'total': money_str(total), 'paid': money_str(paid), 'credited': money_str(credit),
             'due': money_str(due), 'refundable': money_str(refundable), 'pending_refund': money_str(pending_refund),
             'currency': appointment.snapshot.get('currency', 'LKR')}
@@ -139,7 +160,7 @@ def lock_appointment(appointment_id):
     if not hint:
         raise BookingError('not_found', 'Appointment not found.', 404)
     slot = lock_slot(hint['reservation__slot_id'])
-    appointment = Appointment.objects.select_for_update().select_related('patient', 'facility', 'reservation', 'doctor', 'service').get(pk=appointment_id)
+    appointment = Appointment.objects.select_for_update().get(pk=appointment_id)
     return appointment, slot
 
 
@@ -277,26 +298,43 @@ def record_counter_payment(user, appointment_id, expected_version, amount, kind=
     return execute_refund(user, appointment, amount, 'staff_partial', method='counter')
 
 
+@transaction.atomic
 def execute_refund(user, appointment, amount, reason, method='counter', change=None):
+    # This is a durable intent only. A worker submits AFTER this transaction commits.
+    appointment = Appointment.objects.select_for_update().get(pk=appointment.pk)
     amount = money(amount)
     refundable = money(appointment_financials(appointment)['refundable'])
     if amount <= 0 or amount > refundable:
-        raise BookingError('validation', 'Refund amount must be within the collected balance.', 400)
-    obligation = RefundObligation.objects.create(facility=appointment.facility, appointment=appointment, change=change,
-                                                 amount=amount, currency=appointment.snapshot.get('currency', 'LKR'), reason=reason)
-    source = Payment.objects.filter(appointment=appointment, kind='charge', status='succeeded').order_by('created_at').first()
-    result = adapter().refund(key=f'refund:{obligation.pk}', payment_reference=source.provider_reference if source else 'none', amount=amount)
-    payment = record_succeeded_payment(appointment=appointment, amount=amount, method=method, actor=user,
-                                       event_id=event_key(), reference=result.reference, obligation=obligation, kind='refund')
-    obligation.status = 'refunded'; obligation.version += 1
-    obligation.save(update_fields=['status', 'version'])
-    sync_payment_state(appointment)
-    audit(user, 'refund.recorded', payment.pk, appointment.facility, {'amount': money_str(amount), 'reason': reason})
-    enqueue(f'refund:{payment.pk}:recorded', 'payment.refunded', {'payment_id': str(payment.pk)})
+        raise BookingError('validation', 'Refund amount must be within the unreserved collected balance.', 400)
+    sources = list(funding_payments(appointment).select_for_update().order_by('pk'))
+    operations = []
+    remaining = amount
+    for source in sources:
+        reserved = RefundObligation.objects.filter(source_payment=source,
+            status__in=['pending', 'submitting', 'unknown', 'refunded']).aggregate(total=Sum('amount'))['total'] or money(0)
+        available = max(money(0), source.amount - reserved)
+        allocation = min(remaining, available)
+        if allocation <= 0:
+            continue
+        obligation = RefundObligation.objects.create(facility=appointment.facility, appointment=appointment, change=change,
+            amount=allocation, currency=appointment.snapshot.get('currency', 'LKR'), reason=reason,
+            actor=user, method=source.method, source_payment=source, next_attempt_at=timezone.now())
+        operations.append(obligation)
+        enqueue(f'refund:{obligation.pk}:requested', 'refund.requested', {'obligation_id': str(obligation.pk)})
+        audit(user, 'refund.requested', obligation.pk, appointment.facility, {'amount': money_str(allocation)})
+        remaining -= allocation
+        if remaining == 0:
+            break
+    if remaining:
+        raise BookingError('validation', 'Collected sources cannot cover this refund; finance reconciliation is required.')
+    appointment.version += 1
+    appointment.save(update_fields=['version'])
     from appointments.services import appointment_data
-    return {'payment': payment_data(payment), 'obligation_id': str(obligation.pk), 'appointment': appointment_data(appointment, user)}
+    return {'obligation_id': str(operations[0].pk), 'obligation_ids': [str(op.pk) for op in operations], 'status': 'pending',
+            'appointment': appointment_data(appointment, user)}
 
 
+@transaction.atomic
 def record_refund(user, appointment_id, expected_version, amount, reason='staff_partial'):
     require_finance_staff(user)
     appointment, _ = lock_appointment(appointment_id)
@@ -304,17 +342,20 @@ def record_refund(user, appointment_id, expected_version, amount, reason='staff_
     require_finance_staff(user, appointment.facility_id)
     if appointment.version != expected_version:
         raise BookingError('stale_version', 'This appointment has changed. Refresh before recording a refund.')
-    return execute_refund(user, appointment, amount, reason)
+    method = 'hosted' if appointment.payments.filter(kind='charge', method='hosted').exists() else 'counter'
+    return execute_refund(user, appointment, amount, reason, method=method)
 
 
 def raise_exception(*, reason, event_id, amount=0, currency='LKR', checkout=None, appointment=None, change=None, reference='', facility=None):
     existing = FinanceException.objects.filter(provider_event_id=event_id).first()
     if existing:
         return existing
-    item = FinanceException.objects.create(
+    item, created = FinanceException.objects.get_or_create(provider_event_id=event_id, defaults=dict(
         facility=facility or (appointment.facility if appointment else None) or (checkout.facility if checkout else None),
         appointment=appointment, checkout=checkout, change=change, reason=reason, amount=money(amount), currency=currency,
-        provider_event_id=event_id, provider_reference=reference)
+        provider_reference=reference))
+    if not created:
+        return item
     if checkout and checkout.status == 'pending':
         checkout.status = 'unmatched'; checkout.version += 1
         checkout.save(update_fields=['status', 'version'])
@@ -350,7 +391,7 @@ def cancel_appointment(user, appointment_id, expected_version, reason='patient_r
     now = timezone.now()
     if not patient_can_change(user, appointment, now):
         raise BookingError('cutoff', 'Patient changes close 24 hours before the visit in this demo. Ask reception for help.', 409)
-    paid = net_paid(appointment)
+    paid = money(appointment_financials(appointment)['refundable'])
     source = 'patient' if user.role == 'patient' else user.role
     change = AppointmentChange.objects.create(facility=appointment.facility, original=appointment, actor=user, kind='cancellation',
                                               fee_direction='none', status='completed', refund_amount=paid)
@@ -362,7 +403,7 @@ def cancel_appointment(user, appointment_id, expected_version, reason='patient_r
                                      method='hosted' if appointment.payments.filter(kind='charge', method='hosted').exists() else 'counter', change=change))
         appointment.refresh_from_db()
     audit(user, 'appointment.cancelled', appointment.pk, appointment.facility, {'reason': reason, 'refund': money_str(paid)})
-    enqueue(f'appointment:{appointment.pk}:cancelled:{appointment.version}', 'appointment.cancelled', {'appointment_id': str(appointment.pk)})
+    enqueue(f'appointment:{appointment.pk}:cancelled:{appointment.version}', 'appointment.cancelled', {'appointment_id': str(appointment.pk), 'version': appointment.version})
     from appointments.services import appointment_data
     result['appointment'] = appointment_data(appointment, user)
     return result
@@ -371,7 +412,9 @@ def cancel_appointment(user, appointment_id, expected_version, reason='patient_r
 def preview_reschedule(original, hold):
     original_total = money(original.snapshot['total'])
     replacement_total = money(hold.snapshot['total'])
-    paid = net_paid(original)
+    if RefundObligation.objects.filter(appointment=original, status__in=['pending', 'submitting', 'unknown']).exists():
+        raise BookingError('state_conflict', 'Resolve in-flight refunds before rescheduling.')
+    paid = money(appointment_financials(original)['refundable'])
     credited = min(paid, replacement_total)
     additional = max(money(0), replacement_total - paid)
     refund = max(money(0), paid - replacement_total)
@@ -417,10 +460,9 @@ def request_reschedule(user, appointment_id, hold_id, expected_version, expected
     hold = owned_reservation(user, hold_id)
     if str(hold.patient_id) != str(original.patient_id):
         raise BookingError('forbidden', 'The replacement hold belongs to a different patient.', 403)
-    original, original_slot = lock_appointment(original.pk)
     slots = lock_slots([original.reservation.slot_id, hold.slot_id])
     original_slot, replacement_slot = slots[0], slots[1]
-    original = Appointment.objects.select_for_update().select_related('patient', 'facility', 'reservation').get(pk=original.pk)
+    original = Appointment.objects.select_for_update().get(pk=original.pk)
     hold = Reservation.objects.select_for_update().get(pk=hold.pk)
     now = timezone.now()
     if original.version != expected_version:
@@ -462,26 +504,26 @@ def request_reschedule(user, appointment_id, hold_id, expected_version, expected
     audit(user, 'appointment.rescheduled', replacement.pk, replacement.facility,
           {'original': original.reference, 'direction': preview['direction']})
     enqueue(f'appointment:{replacement.pk}:rescheduled:1', 'appointment.rescheduled',
-            {'original_id': str(original.pk), 'replacement_id': str(replacement.pk)})
+            {'appointment_id': str(replacement.pk), 'original_id': str(original.pk), 'replacement_id': str(replacement.pk), 'version': replacement.version})
     from appointments.services import appointment_data
     result['appointment'] = appointment_data(original, user)
     result['replacement'] = appointment_data(replacement, user)
     return result
 
 
-def complete_pending_change(user, change, event_id, reference, method, amount):
+def complete_pending_change(user, change, event_id, reference, method, amount, checkout=None):
     now = timezone.now()
     original_slot_id = Appointment.objects.filter(pk=change.original_id).values_list('reservation__slot_id', flat=True).first()
     hold_slot_id = Reservation.objects.filter(pk=change.hold_id).values_list('slot_id', flat=True).first()
     original_slot, replacement_slot = lock_slots([original_slot_id, hold_slot_id])
-    original = Appointment.objects.select_for_update().select_related('patient', 'facility', 'reservation').get(pk=change.original_id)
+    original = Appointment.objects.select_for_update().get(pk=change.original_id)
     hold = Reservation.objects.select_for_update().get(pk=change.hold_id)
     change = AppointmentChange.objects.select_for_update().get(pk=change.pk)
     if change.status != 'pending_payment':
         raise BookingError('state_conflict', 'This change is not waiting for payment.')
     expire_locked(replacement_slot, now)
     hold = Reservation.objects.select_for_update().get(pk=change.hold_id)
-    replacement_slot = Slot.objects.select_for_update().select_related('session__facility', 'session__doctor', 'session__service').get(pk=replacement_slot.pk)
+    replacement_slot = Slot.objects.select_for_update().get(pk=replacement_slot.pk)
     if hold.status != 'held' or hold.expires_at <= now or replacement_slot.active_reservation_id != hold.pk:
         raise_exception(reason='late_payment', event_id=event_id, amount=amount, appointment=original,
                         change=change, reference=reference, facility=original.facility)
@@ -498,12 +540,12 @@ def complete_pending_change(user, change, event_id, reference, method, amount):
     change.save(update_fields=['replacement', 'status', 'version'])
     actor = user if getattr(user, 'is_authenticated', False) else change.actor
     payment = record_succeeded_payment(appointment=replacement, amount=amount, method=method, actor=actor,
-                                       event_id=event_id, reference=reference)
+                                       event_id=event_id, reference=reference, checkout=checkout)
     replacement.refresh_from_db()
     sync_payment_state(replacement)
     audit(change.actor, 'appointment.rescheduled', replacement.pk, replacement.facility, {'original': original.reference, 'direction': 'higher'})
     enqueue(f'appointment:{replacement.pk}:rescheduled:1', 'appointment.rescheduled',
-            {'original_id': str(original.pk), 'replacement_id': str(replacement.pk)})
+            {'appointment_id': str(replacement.pk), 'original_id': str(original.pk), 'replacement_id': str(replacement.pk), 'version': replacement.version})
     return payment, replacement
 
 
@@ -513,6 +555,9 @@ def record_change_payment(user, change_id, expected_version, amount):
     if not change:
         raise BookingError('not_found', 'Appointment change not found.', 404)
     accessible_appointment(user, change.original_id)
+    original_slot_id = Appointment.objects.filter(pk=change.original_id).values_list('reservation__slot_id', flat=True).get()
+    hold_slot_id = Reservation.objects.filter(pk=change.hold_id).values_list('slot_id', flat=True).get()
+    lock_slots([original_slot_id, hold_slot_id])
     change = AppointmentChange.objects.select_for_update().get(pk=change.pk)
     if change.version != expected_version:
         raise BookingError('stale_version', 'This change has been updated. Refresh before paying.')
@@ -521,19 +566,48 @@ def record_change_payment(user, change_id, expected_version, amount):
     return {'payment': payment_data(payment), 'replacement': appointment_data(replacement, user), 'change': change_data(change)}
 
 
+@transaction.atomic
 def apply_callback_payload(payload, actor=None):
     event_id = payload['event_id']
     existing = Payment.objects.filter(provider_event_id=event_id).first()
     if existing:
+        if (str(existing.checkout_id) != str(payload['checkout_id'])
+                or existing.amount != money(payload['amount']) or existing.currency != payload['currency']
+                or existing.provider_reference != payload['provider_reference'] or payload['status'] != 'succeeded'):
+            raise BookingError('idempotency_conflict', 'Provider event identity was reused with different content.')
         return {'duplicate': True, 'payment': payment_data(existing)}
     existing_exc = FinanceException.objects.filter(provider_event_id=event_id).first()
     if existing_exc:
         return {'duplicate': True, 'exception': exception_data(existing_exc)}
+    hint = Checkout.objects.filter(pk=payload['checkout_id']).first()
+    if hint:
+        if hint.change_id:
+            change_hint = AppointmentChange.objects.get(pk=hint.change_id)
+            slot_ids = [Appointment.objects.values_list('reservation__slot_id', flat=True).get(pk=change_hint.original_id),
+                        Reservation.objects.values_list('slot_id', flat=True).get(pk=change_hint.hold_id)]
+            lock_slots(slot_ids)
+        else:
+            lock_appointment(hint.appointment_id)
     checkout = Checkout.objects.select_for_update().filter(pk=payload['checkout_id']).first()
     if not checkout:
         item = raise_exception(reason='unmatched', event_id=event_id, amount=payload.get('amount') or 0,
                                reference=payload.get('provider_reference', ''))
         return {'exception': exception_data(item)}
+    if payload['provider_reference'] != checkout.provider_reference:
+        raise BookingError('invalid_reference', 'Provider reference does not match the checkout.', 400)
+    existing = Payment.objects.filter(provider_event_id=event_id).first()
+    if existing:
+        if (str(existing.checkout_id) != str(payload['checkout_id'])
+                or existing.amount != money(payload['amount']) or existing.currency != payload['currency']
+                or existing.provider_reference != payload['provider_reference'] or payload['status'] != 'succeeded'):
+            raise BookingError('idempotency_conflict', 'Provider event identity was reused with different content.')
+        return {'duplicate': True, 'payment': payment_data(existing)}
+    if checkout.status == 'succeeded':
+        payment = Payment.objects.filter(checkout=checkout, kind='charge').first()
+        return {'duplicate': True, 'checkout': checkout_data(checkout),
+                'payment': payment_data(payment) if payment else None}
+    if checkout.last_event_id == event_id:
+        return {'duplicate': True, 'checkout': checkout_data(checkout)}
     if payload['currency'] != checkout.currency or money(payload['amount']) != money(checkout.amount):
         item = raise_exception(reason='amount_mismatch', event_id=event_id, amount=payload['amount'], checkout=checkout,
                                appointment=checkout.appointment, change=checkout.change, reference=payload['provider_reference'])
@@ -548,7 +622,7 @@ def apply_callback_payload(payload, actor=None):
     if checkout.purpose == 'reschedule_additional':
         change = AppointmentChange.objects.select_for_update().get(pk=checkout.change_id)
         try:
-            payment, replacement = complete_pending_change(change.actor, change, event_id, payload['provider_reference'], 'hosted', checkout.amount)
+            payment, replacement = complete_pending_change(change.actor, change, event_id, payload['provider_reference'], 'hosted', checkout.amount, checkout=checkout)
         except BookingError as exc:
             if exc.code in ['late_payment', 'amount_mismatch', 'hold_expired']:
                 return {'exception': exception_data(FinanceException.objects.get(provider_event_id=event_id)), 'code': exc.code}
@@ -579,18 +653,15 @@ def apply_signed_callback(body, signature):
     except ValueError as exc:
         if str(exc) == 'invalid_signature':
             raise BookingError('invalid_signature', 'The payment callback signature is invalid.', 400) from exc
-        event_id = 'malformed-' + uuid.uuid4().hex
-        try:
-            raw = json.loads(body.decode())
-            event_id = raw.get('event_id') or event_id
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            pass
+        event_id = 'malformed-' + hashlib.sha256(body).hexdigest()[:40]
         item = raise_exception(reason='malformed', event_id=event_id, reference='')
         return {'exception': exception_data(item)}
     return apply_callback_payload(payload)
 
 
 def simulate_checkout(user, checkout_id, outcome):
+    if not (settings.DEBUG and settings.DEMO_MODE):
+        raise BookingError('not_found', 'Checkout simulation is unavailable.', 404)
     if not user.is_authenticated:
         raise BookingError('forbidden', 'Sign in to control the simulated payment.', 403)
     checkout = Checkout.objects.filter(pk=checkout_id).first()

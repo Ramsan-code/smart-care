@@ -27,14 +27,32 @@ jobs:
       DB_PORT: '3306'
       REDIS_URL: redis://127.0.0.1:6379/0
       REDIS_CACHE_URL: redis://127.0.0.1:6379/1
+      OPERATIONS_TEST_REDIS_URL: redis://127.0.0.1:6379/13
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: sudo apt-get update && sudo apt-get install -y default-libmysqlclient-dev build-essential pkg-config
-      - run: pip install -r requirements.txt
-      - run: python manage.py check
-      - run: python manage.py makemigrations --check --dry-run
-      - run: python manage.py migrate --noinput
-      - run: python manage.py test --noinput
+      - run: bash scripts/operations/setup_local.sh
+      - run: .venv/bin/python -m pip check
+      - run: .venv/bin/python manage.py check
+      - run: .venv/bin/python manage.py makemigrations --check --dry-run
+      - run: .venv/bin/python manage.py migrate --noinput
+      - run: .venv/bin/python scripts/check_production.py
+      - run: .venv/bin/python manage.py test --debug-mode --noinput
+      - run: .venv/bin/python scripts/recovery_harness.py
+      - run: .venv/bin/python scripts/operations/staging_journey.py
+      - run: docker compose -f deploy/compose.staging.yml -f deploy/compose.isolated.yml config --quiet
+      - run: docker build --target app -t smartcare-app:ci .
+      - run: docker build --target proxy -t smartcare-proxy:ci .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operational-evidence
+          path: |
+            .runtime/staging-*/report.json
+            .runtime/recovery-*/report.json
+            .runtime/recovery-*/worker*.log
+            .runtime/recovery-*/beat.log
+          if-no-files-found: ignore

@@ -61,6 +61,7 @@ class ExceptionResolveInput(StrictInput):
 
 
 class GatewayImportInput(StrictInput):
+    file = serializers.FileField()
     facility_id = serializers.IntegerField(min_value=1)
 
 
@@ -69,11 +70,13 @@ class FacilityInput(StrictInput):
 
 
 class SettlementInput(FacilityInput):
+    currency = serializers.RegexField(r'^[A-Z]{3}$', default='LKR')
     reference = serializers.CharField(max_length=128)
     adjustment = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
 
 
 class RefundAdjustmentInput(StrictInput):
+    refund_id = serializers.UUIDField()
     paid_batch_id = serializers.IntegerField(min_value=1)
     payable_id = serializers.IntegerField(min_value=1)
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
@@ -204,12 +207,19 @@ class SettlementView(DomainView):
     def post(self, request):
         form = SettlementInput(data=request.data)
         form.is_valid(raise_exception=True)
-        return Response(create_settlement(request.user, **form.validated_data), status=201)
+        result = command(request.user, 'settlement.create', request.headers.get('Idempotency-Key'),
+            dict(request.data), lambda: create_settlement(request.user, **form.validated_data))
+        return Response(result, status=201)
 
 
 class SettlementActionView(DomainView):
     def post(self, request, pk, action):
-        return Response(change_settlement(request.user, pk, action))
+        form = StrictInput(data=request.data)
+        form.is_valid(raise_exception=True)
+        result = command(request.user, 'settlement.transition', request.headers.get('Idempotency-Key'),
+            {'batch_id': pk, 'action': action},
+            lambda: change_settlement(request.user, pk, action))
+        return Response(result)
 
 
 class SettlementExportView(DomainView):
@@ -221,7 +231,9 @@ class RefundAdjustmentView(DomainView):
     def post(self, request):
         form = RefundAdjustmentInput(data=request.data)
         form.is_valid(raise_exception=True)
-        return Response(add_refund_adjustment(request.user, **form.validated_data), status=201)
+        result = command(request.user, 'settlement.refund_adjustment', request.headers.get('Idempotency-Key'),
+            dict(request.data), lambda: add_refund_adjustment(request.user, **form.validated_data))
+        return Response(result, status=201)
 
 
 class OperationsReportView(DomainView):

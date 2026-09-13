@@ -15,6 +15,9 @@ from .services import BookingError, eligible
 class DomainView(APIView):
     def handle_exception(self, exc):
         if isinstance(exc, BookingError):
+            if exc.code in ['capacity_conflict', 'stale_version', 'state_conflict']:
+                from operations.telemetry import count
+                count('booking_conflicts')
             return Response({'code': exc.code, 'message': exc.message, 'field_errors': {},
                              'correlation_id': str(getattr(self.request, 'correlation_id', ''))}, status=exc.status)
         response = super().handle_exception(exc)
